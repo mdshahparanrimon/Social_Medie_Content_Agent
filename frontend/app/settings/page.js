@@ -6,6 +6,7 @@ import { api, PLATFORMS } from '@/lib/api';
 import { Button, Card, ErrorText, PageHeader } from '@/components/ui';
 import { AccentPicker, ModeSwitch } from '@/components/theme';
 import { useAuth } from '@/components/auth';
+import AIUsage from '@/components/AIUsage';
 
 const AI_PROVIDERS = [
   {
@@ -21,13 +22,23 @@ const AI_PROVIDERS = [
   },
   {
     key: 'openai_compat',
-    name: 'Groq / OpenRouter / Ollama',
-    badge: 'Free tier',
-    help: 'Any OpenAI-compatible API. Groq: free key at console.groq.com. OpenRouter: base URL https://openrouter.ai/api/v1 with a ":free" model. Ollama on this computer: http://localhost:11434/v1, no key.',
+    name: 'Any provider (OpenAI-compatible)',
+    badge: 'OpenRouter, Groq, OpenAI…',
+    help: 'Works with any OpenAI-compatible API: pick a provider below or paste its base URL, then add your key and a model name from that provider. Groq and OpenRouter (":free" models) have free tiers. The app owner can also use Ollama on the server: http://localhost:11434/v1, no key.',
     fields: [
       { key: 'openai_compat_base_url', label: 'Base URL' },
       { key: 'openai_compat_api_key', label: 'API key', secret: true },
-      { key: 'openai_compat_model', label: 'Model', hint: 'Groq e.g. llama-3.3-70b-versatile' },
+      { key: 'openai_compat_model', label: 'Model', hint: 'Exactly as the provider names it, e.g. llama-3.3-70b-versatile on Groq' },
+    ],
+    // One click fills the base URL.
+    presets: [
+      { name: 'OpenRouter', url: 'https://openrouter.ai/api/v1' },
+      { name: 'Groq', url: 'https://api.groq.com/openai/v1' },
+      { name: 'OpenAI', url: 'https://api.openai.com/v1' },
+      { name: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
+      { name: 'Mistral', url: 'https://api.mistral.ai/v1' },
+      { name: 'Together', url: 'https://api.together.xyz/v1' },
+      { name: 'xAI', url: 'https://api.x.ai/v1' },
     ],
   },
   {
@@ -39,6 +50,14 @@ const AI_PROVIDERS = [
       { key: 'anthropic_api_key', label: 'API key', secret: true },
       { key: 'anthropic_model', label: 'Model', hint: 'claude-opus-5-5 (best) or claude-sonnet-5-5 (half the price)' },
     ],
+  },
+  {
+    key: 'mcp',
+    name: 'Claude.ai (MCP)',
+    badge: 'No API key: uses your Claude plan',
+    help: 'Your own Claude (claude.ai, Claude Desktop) plans and writes the posts using your Claude subscription; they appear here as drafts for you to review. The AI buttons inside this app need an API key, so with this option you ask Claude in claude.ai instead. Save this choice, then set up the connector below.',
+    fields: [],
+    connector: true,
   },
 ];
 
@@ -227,6 +246,56 @@ function Section({ id, title, badge, description, settings, onSaved, testTarget,
   );
 }
 
+// AI images use the chosen provider when it can make them; Claude can't, so it takes a Gemini key for images.
+function ImageSettings({ providerKey, field }) {
+  let help;
+  let fields;
+  if (providerKey === 'gemini') {
+    help = 'Images are made with your Gemini key above.';
+    fields = [{ key: 'gemini_image_model', label: 'Image model', hint: 'e.g. gemini-3.1-flash-image (Nano Banana 2)' }];
+  } else if (providerKey === 'openai_compat') {
+    help = "Needs a provider with an /images/generations API, such as OpenAI. Leave empty if yours has none (Groq doesn't).";
+    fields = [{ key: 'openai_compat_image_model', label: 'Image model', hint: 'e.g. gpt-image-1 on OpenAI' }];
+  } else {
+    help = "Claude writes posts but can't make images. Add a Gemini key (free tier: aistudio.google.com) to make post images with Gemini.";
+    fields = [
+      { key: 'gemini_api_key', label: 'Gemini API key (for images)', secret: true },
+      { key: 'gemini_image_model', label: 'Image model', hint: 'e.g. gemini-3.1-flash-image (Nano Banana 2)' },
+    ];
+  }
+  return (
+    <div className="space-y-3 rounded-lg border border-zinc-200 p-4">
+      <h3 className="text-sm font-semibold text-zinc-900">Images</h3>
+      <p className="hint">{help}</p>
+      {fields.map(field)}
+    </div>
+  );
+}
+
+// AI videos, like images: the chosen provider when it can make them, otherwise a Gemini key.
+function VideoSettings({ providerKey, field }) {
+  const geminiModel = { key: 'gemini_video_model', label: 'Video model', hint: 'e.g. gemini-omni-1.1-flash (Gemini Omni Flash)' };
+  let help;
+  let fields;
+  if (providerKey === 'gemini') {
+    help = 'Videos are made with your Gemini key above.';
+    fields = [geminiModel];
+  } else if (providerKey === 'openai_compat') {
+    help = 'Needs a provider with a /videos API, such as OpenAI (Sora). Leave empty if yours has none; a Gemini key is used instead if saved.';
+    fields = [{ key: 'openai_compat_video_model', label: 'Video model', hint: 'e.g. sora-2 on OpenAI' }];
+  } else {
+    help = "Claude can't make videos. Videos use the Gemini key from Images above.";
+    fields = [geminiModel];
+  }
+  return (
+    <div className="space-y-3 rounded-lg border border-zinc-200 p-4">
+      <h3 className="text-sm font-semibold text-zinc-900">Video</h3>
+      <p className="hint">{help}</p>
+      {fields.map(field)}
+    </div>
+  );
+}
+
 function ReadyBadge({ ready }) {
   return ready ? (
     <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">App ready</span>
@@ -235,12 +304,12 @@ function ReadyBadge({ ready }) {
   );
 }
 
-function CallbackUrl({ url }) {
+function CallbackUrl({ url, label = 'Callback URL (paste into the developer app)' }) {
   const [copied, setCopied] = useState(false);
   if (!url) return null;
   return (
     <div>
-      <label className="label">Callback URL (paste into the developer app)</label>
+      <label className="label">{label}</label>
       <div className="flex gap-2">
         <code className="input select-all overflow-x-auto bg-zinc-50 whitespace-nowrap">{url}</code>
         <Button
@@ -253,6 +322,79 @@ function CallbackUrl({ url }) {
           {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>
+    </div>
+  );
+}
+
+// The secret connector URL for claude.ai. The server keeps only a hash, so the full URL is shown once, right after creating it.
+function McpConnector({ onChange }) {
+  const [state, setState] = useState(null);
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api('/mcp').then(setState).catch((err) => setError(err.message));
+  }, []);
+
+  async function run(method) {
+    if (method === 'POST' && state?.active && !window.confirm('Create a new URL? The current one stops working in Claude.')) return;
+    if (method === 'DELETE' && !window.confirm('Turn off the connector? Claude loses access until you create a new URL.')) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api('/mcp', { method });
+      setState(result);
+      setUrl(result.url || '');
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    }
+    setBusy(false);
+  }
+
+  const local = /\/\/(localhost|127\.0\.0\.1)[:/]/.test(url);
+
+  return (
+    <div className="space-y-3 rounded-lg border border-zinc-200 p-4">
+      <h3 className="text-sm font-semibold text-zinc-900">Claude connector</h3>
+      <ol className="list-decimal space-y-1 pl-5 text-sm text-zinc-600">
+        <li>Click Create connector URL and copy it. It&apos;s only shown once: keep it private, it works like a password.</li>
+        <li>claude.ai → Settings → Connectors → Add custom connector. Name: Content Agent. Paste the URL, then Add.</li>
+        <li>In a chat, turn on Content Agent (the tools menu) and ask, for example: &quot;Plan next week&apos;s posts and write the drafts.&quot;</li>
+        <li>The drafts appear in Posts. Review and approve them here, or ask Claude to schedule them.</li>
+      </ol>
+
+      {url ? (
+        <>
+          <CallbackUrl url={url} label="Connector URL (paste into claude.ai)" />
+          {local && (
+            <p className="text-sm text-amber-700">
+              This is a localhost address, which claude.ai can&apos;t reach. Deploy the backend and set PUBLIC_API_URL, then create a new URL.
+            </p>
+          )}
+        </>
+      ) : (
+        state && (
+          <p className="text-sm text-zinc-600">
+            {state.active
+              ? `Connector active since ${new Date(state.created_at).toLocaleDateString()}. Lost the URL? Create a new one.`
+              : 'No connector yet.'}
+          </p>
+        )
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <Button variant={state?.active ? 'secondary' : 'primary'} onClick={() => run('POST')} disabled={busy || !state}>
+          {busy ? 'Working…' : state?.active ? 'Create new URL' : 'Create connector URL'}
+        </Button>
+        {state?.active && (
+          <Button variant="danger" onClick={() => run('DELETE')} disabled={busy}>
+            Turn off
+          </Button>
+        )}
+      </div>
+      <ErrorText error={error} />
     </div>
   );
 }
@@ -294,22 +436,21 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
+      {status && <AIUsage ai={status.ai} images={status.images} videos={status.videos} usage={status.usage} />}
+
       <PageHeader
         title="Settings"
         description={
           isAdmin
-            ? 'App-wide settings apply to every user; Publishing is your own workspace. API keys are stored encrypted and never shown again.'
+            ? 'AI and Publishing are your own workspace; everything else is app-wide and applies to every user. API keys are stored encrypted and never shown again.'
             : 'Settings for your workspace.'
         }
       />
 
-      {isAdmin && (
-        <>
-
       <Section
         id="ai"
         title="AI"
-        description="Pick which AI writes your content. Use a free one for testing and switch any time."
+        description="Use your own API key from any provider. Only your workspace uses it, and the provider bills your own account."
         settings={settings}
         onSaved={onSaved}
         testTarget="ai"
@@ -319,7 +460,7 @@ export default function SettingsPage() {
           const provider = AI_PROVIDERS.find((p) => p.key === providerKey);
           return (
             <>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-2">
                 {AI_PROVIDERS.map((p) => (
                   <button
                     key={p.key}
@@ -335,11 +476,26 @@ export default function SettingsPage() {
                 ))}
               </div>
               <p className="hint">{provider.help}</p>
+              {provider.presets && (
+                <div className="flex flex-wrap gap-2">
+                  {provider.presets.map((preset) => (
+                    <Button key={preset.name} variant="secondary" onClick={() => setField('openai_compat_base_url', preset.url)}>
+                      {preset.name}
+                    </Button>
+                  ))}
+                </div>
+              )}
               <div className="space-y-3">{provider.fields.map(field)}</div>
+              {provider.connector && <McpConnector onChange={loadStatus} />}
+              <ImageSettings providerKey={providerKey} field={field} />
+              <VideoSettings providerKey={providerKey} field={field} />
             </>
           );
         }}
       </Section>
+
+      {isAdmin && (
+        <>
 
       <Section
         id="signin"
@@ -484,19 +640,6 @@ export default function SettingsPage() {
         </div>
       </Card>
 
-      {status && (
-        <Card className="space-y-1 text-sm">
-          <h2 className="mb-2 font-semibold">AI usage</h2>
-          <p>
-            Active: {status.ai.label} ({status.ai.model})
-          </p>
-          <p>Calls: {status.usage.calls}</p>
-          <p>
-            Tokens: {status.usage.input_tokens.toLocaleString()} in / {status.usage.output_tokens.toLocaleString()} out
-          </p>
-          <p>Claude cost (estimated): ${status.usage.cost_usd.toFixed(2)}</p>
-        </Card>
-      )}
     </div>
   );
 }

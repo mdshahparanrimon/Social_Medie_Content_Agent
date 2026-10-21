@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "pnpm --parallel -r dev",
     "dev:backend": "pnpm --filter backend dev",
-    "dev:frontend": "pnpm --filter frontend dev"
+    "dev:frontend": "pnpm --filter frontend dev",
+    "package:hostinger": "node scripts/package-hostinger.mjs"
   },
   "engines": {
     "node": ">=22.13"

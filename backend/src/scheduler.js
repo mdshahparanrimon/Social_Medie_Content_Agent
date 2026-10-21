@@ -87,6 +87,7 @@ async function refreshInstagram() {
 export async function startScheduler() {
   // A post stuck in 'publishing' means the server stopped mid-request; it may or may not have gone out.
   await repo.failInterruptedPosts('Interrupted while publishing. Check the platform before retrying.');
+  await repo.failInterruptedVideos('Interrupted: the server restarted while the video was being made. Generate it again.');
 
   let running = false;
   const tick = async () => {

@@ -113,6 +113,17 @@ frontend/  Next.js + Tailwind
 
 **Login callback URLs** (Settings → Sign-in & email shows them): `http://localhost:3000/api/auth/google/callback` and `http://localhost:3000/api/auth/linkedin/callback`. They point at the frontend, which forwards `/api` to the backend (`frontend/next.config.mjs`), so the session cookie belongs to the app's own domain.
 
+### Hostinger (Business / Cloud plan, Node.js Web Apps)
+
+Hostinger runs one Node.js app per website, so the backend and frontend are two Web Apps (each gets its own domain or temporary domain).
+
+1. `pnpm package:hostinger` → `deploy/backend.tar.gz` and `deploy/frontend.tar.gz` (no `node_modules`, `.env` or local data; Hostinger installs dependencies on Linux).
+2. **Backend app**: hPanel → Websites → Add website → Node.js Apps → upload `backend.tar.gz`. Framework preset **Express**, Node **22** or **24**, build command empty, entry file **`src/server.js`**. Environment variables:
+   `NODE_ENV=production`, `MONGODB_URI`, `MONGODB_DB=content_agent`, `ENCRYPTION_KEY` (the same value as in your local `backend/.env`, or every saved key becomes unreadable), `FRONTEND_ORIGIN=https://<frontend domain>`, `PUBLIC_API_URL=https://<backend domain>`, `HOST=0.0.0.0`, `TRUST_PROXY=true`, and optionally `UPLOAD_DIR` (a folder outside the app, since each deploy replaces the app folder; or use Cloudinary).
+3. **Frontend app**: upload `frontend.tar.gz`. Preset **Next.js**, build command `npm run build`, output `.next`. Environment variable `API_PROXY_TARGET=https://<backend domain>` (read at build time: redeploy after changing it).
+4. MongoDB Atlas → Network Access: allow the Hostinger server's outgoing IP.
+5. Update the callback URLs in every developer app: posting `https://<backend domain>/api/oauth/<platform>/callback`, login `https://<frontend domain>/api/auth/<google|linkedin>/callback` (Settings shows both).
+
 ### Putting it on a server
 
 1. Run the backend on the server with `HOST=127.0.0.1` (default) and put the frontend on your domain; the frontend's `/api` proxy reaches the backend (`API_PROXY_TARGET`, default `http://127.0.0.1:4000`; set it before `next build`).

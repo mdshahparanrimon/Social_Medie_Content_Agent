@@ -1,22 +1,33 @@
 import { repo } from './db/index.js';
 import { encrypt, decrypt } from './crypto.js';
 import { httpError } from './errors.js';
-import { hasWorkspace } from './context.js';
+import { hasWorkspace, runInWorkspace } from './context.js';
 
 // Every setting the dashboard can change.
 // secret: encrypted in the database and never sent back to the browser.
 // env: an old .env variable that is copied into the database once, on startup.
 // workspace: each customer sets it for their own workspace. Everything else is app-wide and only the owner (admin) can change it.
 export const FIELDS = {
-  ai_provider: { default: 'gemini', options: ['gemini', 'openai_compat', 'anthropic'] },
-  gemini_api_key: { secret: true, env: 'GEMINI_API_KEY' },
-  gemini_model: { default: 'gemini-2.5-flash' },
-  gemini_fallback_model: { default: 'gemini-flash-lite-latest' },
-  openai_compat_base_url: { default: 'https://api.groq.com/openai/v1' },
-  openai_compat_api_key: { secret: true },
-  openai_compat_model: { default: 'llama-3.3-70b-versatile' },
-  anthropic_api_key: { secret: true, env: 'ANTHROPIC_API_KEY' },
-  anthropic_model: { default: 'claude-opus-5-5', env: 'CLAUDE_MODEL' },
+  // AI: every workspace brings its own provider and key; nobody's usage runs on someone else's key.
+  // 'mcp': no API key; the user's own Claude (claude.ai) writes through the MCP connector (see mcp.js).
+  ai_provider: { default: 'gemini', options: ['gemini', 'openai_compat', 'anthropic', 'mcp'], workspace: true },
+  gemini_api_key: { secret: true, workspace: true },
+  gemini_model: { default: 'gemini-2.5-flash', workspace: true },
+  gemini_fallback_model: { default: 'gemini-flash-lite-latest', workspace: true },
+  openai_compat_base_url: { default: 'https://api.groq.com/openai/v1', workspace: true },
+  openai_compat_api_key: { secret: true, workspace: true },
+  openai_compat_model: { default: 'llama-3.3-70b-versatile', workspace: true },
+  anthropic_api_key: { secret: true, workspace: true },
+  anthropic_model: { default: 'claude-opus-5-5', workspace: true },
+  // AI images (see llm/image.js): Gemini, or an OpenAI-style /images/generations model.
+  gemini_image_model: { default: 'gemini-3.1-flash-image', workspace: true },
+  openai_compat_image_model: { workspace: true },
+  // AI video: Gemini Omni Flash (Interactions API) with the Gemini key, or an OpenAI-compatible /videos API (Sora).
+  gemini_video_model: { default: 'gemini-omni-1.1-flash', workspace: true },
+  openai_compat_video_model: { workspace: true },
+  // internal: managed by the server (mcp.js), never sent to or saved from the browser.
+  mcp_token_hash: { workspace: true, internal: true },
+  mcp_token_created_at: { workspace: true, internal: true },
 
   dry_run: { type: 'boolean', default: false, workspace: true },
   post_time_x: { type: 'time', default: '10:00', workspace: true },
@@ -63,7 +74,22 @@ async function stored() {
 }
 
 const isWorkspaceField = (key) => Boolean(FIELDS[key]?.workspace);
-const visibleFields = (admin) => Object.entries(FIELDS).filter(([, field]) => admin || field.workspace);
+const visibleFields = (admin) => Object.entries(FIELDS).filter(([, field]) => !field.internal && (admin || field.workspace));
+
+const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|\[)/i;
+
+// The server calls this URL, so members may only point it at a public HTTPS address, not the server's own network.
+function checkPublicUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw httpError(400, 'Base URL must be a full address, e.g. https://openrouter.ai/api/v1');
+  }
+  if (url.protocol !== 'https:' || PRIVATE_HOST.test(url.hostname)) {
+    throw httpError(400, 'Base URL must be a public https:// address.');
+  }
+}
 
 function defaultValue(field) {
   return field.default ?? (field.type === 'boolean' ? false : '');
@@ -99,8 +125,9 @@ export async function saveSettings(input, { admin = false } = {}) {
   const updates = {};
   for (const [key, value] of Object.entries(input || {})) {
     const field = FIELDS[key];
-    if (!field) continue;
+    if (!field || field.internal) continue;
     if (!field.workspace && !admin) throw httpError(403, 'Only the app owner can change this setting.');
+    if (key === 'openai_compat_base_url' && !admin && value) checkPublicUrl(String(value).trim());
     if (field.secret) {
       if (value === null) updates[key] = null;
       else if (typeof value === 'string' && value.trim()) updates[key] = encrypt(value.trim());
@@ -127,14 +154,23 @@ export async function saveSettings(input, { admin = false } = {}) {
   return getPublicSettings({ admin });
 }
 
-// Before workspaces, dry run and posting times were app-wide. Move them into the owner's workspace once.
+// Settings that used to be app-wide (dry run, posting times, the AI keys) move into the owner's workspace once.
+// Values the workspace already has win.
 export async function moveLegacyWorkspaceSettings() {
   const global = await repo.getSettings();
   const legacy = Object.fromEntries(Object.entries(global).filter(([key, value]) => isWorkspaceField(key) && value != null));
   if (!Object.keys(legacy).length) return;
-  await repo.saveWorkspaceSettings(legacy);
+  const own = await repo.getWorkspaceSettings();
+  const missing = Object.fromEntries(Object.entries(legacy).filter(([key]) => own[key] == null || own[key] === ''));
+  if (Object.keys(missing).length) await repo.saveWorkspaceSettings(missing);
   await repo.saveSettings(Object.fromEntries(Object.keys(legacy).map((key) => [key, null])));
   cache = null;
+}
+
+// On startup: an app that already has an owner still gets its old app-wide values moved (sign-up only does it for the first user).
+export async function moveLegacySettingsToOwner() {
+  const owner = (await repo.listUsers()).filter((user) => user.role === 'admin').at(-1);
+  if (owner?.workspace_id) await runInWorkspace(owner.workspace_id, moveLegacyWorkspaceSettings);
 }
 
 // Copies settings that still live in .env into the database, once. After that the dashboard is the source of truth.

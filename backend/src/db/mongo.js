@@ -52,6 +52,7 @@ export async function connect() {
     accounts.createIndex({ workspace_id: 1, platform: 1 }, { unique: true }),
     usage.createIndex({ workspace_id: 1 }),
     users.createIndex({ email: 1 }, { unique: true }),
+    settings.createIndex({ mcp_token_hash: 1 }, { unique: true, partialFilterExpression: { mcp_token_hash: { $type: 'string' } } }),
     providerIndex('google'),
     providerIndex('linkedin'),
     sessions.createIndex({ user_id: 1 }),
@@ -179,6 +180,10 @@ export async function connect() {
       const docs = await posts.find({ status: 'approved', scheduled_at: { $lte: nowIso } }).sort({ scheduled_at: 1 }).toArray();
       return docs.map(out);
     },
+    // Videos are made in memory; after a restart, ones that were in progress will never finish.
+    async failInterruptedVideos(message) {
+      await posts.updateMany({ video_status: 'generating' }, { $set: { video_status: 'failed', video_error: message, updated_at: now() } });
+    },
     async failInterruptedPosts(message) {
       await posts.updateMany({ status: 'publishing' }, { $set: { status: 'failed', error: message, updated_at: now() } });
     },
@@ -205,6 +210,11 @@ export async function connect() {
     async saveWorkspaceSettings(values) {
       await settings.updateOne({ _id: `ws:${workspaceId()}` }, { $set: values }, { upsert: true });
     },
+    // MCP connector: the workspace whose settings hold this token hash, or null. Runs before any workspace is known.
+    async workspaceIdForMcpToken(hash) {
+      const doc = await settings.findOne({ mcp_token_hash: hash }, { projection: { _id: 1 } });
+      return doc?._id.startsWith('ws:') ? doc._id.slice(3) : null;
+    },
 
     // ---- Connected accounts (one per platform per workspace; credentials arrive already encrypted) ----
     async getAccount(platform) {
@@ -227,24 +237,45 @@ export async function connect() {
     async logUsage(entry) {
       await usage.insertOne({ ...entry, workspace_id: workspaceId(), created_at: now() });
     },
-    async usageTotals() {
-      const [totals] = await usage
+    // Totals, plus calls per task and per day (UTC, last `days` days) for the usage panel.
+    async usageTotals(days = 14) {
+      const since = new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+      const sums = {
+        calls: { $sum: 1 },
+        input_tokens: { $sum: { $ifNull: ['$input_tokens', 0] } },
+        output_tokens: { $sum: { $ifNull: ['$output_tokens', 0] } },
+        cost_usd: { $sum: { $ifNull: ['$cost_usd', 0] } },
+      };
+      const [result] = await usage
         .aggregate([
           { $match: scoped() },
           {
-            $group: {
-              _id: null,
-              calls: { $sum: 1 },
-              input_tokens: { $sum: '$input_tokens' },
-              output_tokens: { $sum: '$output_tokens' },
-              cost_usd: { $sum: { $ifNull: ['$cost_usd', 0] } },
+            $facet: {
+              totals: [{ $group: { _id: null, ...sums, last_at: { $max: '$created_at' } } }],
+              by_task: [{ $group: { _id: '$task', ...sums } }, { $sort: { calls: -1 } }],
+              daily: [
+                { $match: { created_at: { $gte: since } } },
+                { $group: { _id: { $substrBytes: ['$created_at', 0, 10] }, calls: { $sum: 1 } } },
+              ],
             },
           },
         ])
         .toArray();
-      return totals
-        ? { calls: totals.calls, input_tokens: totals.input_tokens, output_tokens: totals.output_tokens, cost_usd: totals.cost_usd }
-        : { calls: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 };
+      const totals = result.totals[0] || { calls: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0, last_at: null };
+      const perDay = new Map(result.daily.map((d) => [d._id, d.calls]));
+      const daily = Array.from({ length: days }, (_, i) => {
+        const date = new Date(Date.now() - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10);
+        return { date, calls: perDay.get(date) || 0 };
+      });
+      return {
+        calls: totals.calls,
+        input_tokens: totals.input_tokens,
+        output_tokens: totals.output_tokens,
+        cost_usd: totals.cost_usd,
+        last_at: totals.last_at,
+        by_task: result.by_task.map(({ _id, ...rest }) => ({ task: _id || 'other', ...rest })),
+        daily,
+      };
     },
 
     // ---- Users ----

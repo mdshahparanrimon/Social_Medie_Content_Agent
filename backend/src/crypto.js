@@ -1,13 +1,29 @@
 import crypto from 'node:crypto';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ENV_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env');
 
+// The key already written in .env, for when the server was started without loading that file.
+// Generating another one then would leave data encrypted with two different keys.
+function keyFromEnvFile() {
+  try {
+    const lines = readFileSync(ENV_PATH, 'utf8').split(/\r?\n/).filter((line) => line.startsWith('ENCRYPTION_KEY='));
+    return lines.length ? lines.at(-1).slice('ENCRYPTION_KEY='.length).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 // API keys saved from the dashboard are encrypted with ENCRYPTION_KEY before they reach the database.
 function loadKey() {
-  let secret = process.env.ENCRYPTION_KEY;
+  let secret = process.env.ENCRYPTION_KEY || keyFromEnvFile();
+  // On a host the .env file isn't kept between deploys, so a generated key would be lost and every saved key with it.
+  if (!secret && process.env.NODE_ENV === 'production') {
+    console.error('\nENCRYPTION_KEY is not set. Add it to the environment variables (copy it from your local backend/.env).\n');
+    process.exit(1);
+  }
   if (!secret) {
     secret = crypto.randomBytes(32).toString('base64');
     appendFileSync(

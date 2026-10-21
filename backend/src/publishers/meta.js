@@ -1,3 +1,5 @@
+import { loadVideo } from '../media.js';
+
 // Facebook Page posting. Meta's API can't post to personal profiles, only Pages.
 // Page tokens taken from a long-lived user token don't expire.
 
@@ -12,8 +14,24 @@ async function graphPost(config, path, params) {
   return data;
 }
 
-// With an image: a photo post with the text as its caption. Without: a text post.
-export async function publish({ text, imageUrl, account, config }) {
+// Videos are uploaded as a file (so videos stored on this server work too) to the Page's videos.
+async function publishVideo({ text, videoUrl, account, config }) {
+  const form = new FormData();
+  form.append('source', new Blob([await loadVideo(videoUrl)], { type: 'video/mp4' }), 'video.mp4');
+  form.append('description', text);
+  form.append('access_token', account.credentials.access_token);
+  const res = await fetch(`https://graph-video.facebook.com/${config.meta_graph_version}/${account.external_id}/videos`, {
+    method: 'POST',
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Facebook video (${res.status}): ${data.error?.message || 'unknown error'}`);
+  return { externalId: data.id, url: `https://www.facebook.com/${data.id}` };
+}
+
+// With a video: a video post. With an image: a photo post with the text as its caption. Otherwise: a text post.
+export async function publish({ text, imageUrl, videoUrl, account, config }) {
+  if (videoUrl) return publishVideo({ text, videoUrl, account, config });
   const pageId = account.external_id;
   const access_token = account.credentials.access_token;
   if (imageUrl) {

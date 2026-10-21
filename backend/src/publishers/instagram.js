@@ -10,7 +10,8 @@ const graphUrl = (config, path) => `https://graph.instagram.com/${config.meta_gr
 async function call(url, options) {
   const res = await fetch(url, options);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`Instagram (${res.status}): ${data.error?.message || 'unknown error'}`);
+  // error_user_msg is Instagram's plain-language explanation (e.g. an unsupported aspect ratio); prefer it when present.
+  if (!res.ok) throw new Error(`Instagram (${res.status}): ${data.error?.error_user_msg || data.error?.message || 'unknown error'}`);
   return data;
 }
 
@@ -19,29 +20,41 @@ export function fetchProfile(config, accessToken) {
   return call(`${graphUrl(config, 'me')}?${params}`);
 }
 
-// Instagram publishes in two steps: create a media container from the image URL, wait until it's processed, publish it.
-export async function publish({ text, imageUrl, account, config }) {
-  if (!imageUrl) throw new Error('Instagram posts need an image. Add one to the post first.');
-  if (isLocalUrl(imageUrl)) {
-    throw new Error('Instagram cannot download images from localhost. Set up Cloudinary in Settings → Media, then upload the image again.');
+// Instagram publishes in two steps: create a media container from the image (or video) URL, wait until it's
+// processed, publish it. A video goes out as a Reel, which takes Instagram longer to process.
+export async function publish({ text, imageUrl, videoUrl, account, config }) {
+  const mediaUrl = videoUrl || imageUrl;
+  const noun = videoUrl ? 'video' : 'image';
+  if (!mediaUrl) throw new Error('Instagram posts need an image or a video. Add one to the post first.');
+  if (isLocalUrl(mediaUrl)) {
+    throw new Error(`Instagram cannot download ${noun}s from localhost. Set up Cloudinary in Settings → Media, then add the ${noun} again.`);
   }
   const userId = account.external_id;
   const access_token = account.credentials.access_token;
 
+  const source = videoUrl ? { media_type: 'REELS', video_url: videoUrl, share_to_feed: 'true' } : { image_url: imageUrl };
   const container = await call(graphUrl(config, `${userId}/media`), {
     method: 'POST',
-    body: new URLSearchParams({ image_url: imageUrl, caption: text, access_token }),
+    body: new URLSearchParams({ ...source, caption: text, access_token }),
   });
 
-  for (let attempt = 0; attempt < 15; attempt++) {
+  const [attempts, waitMs] = videoUrl ? [60, 5000] : [30, 2000];
+  let ready = false;
+  for (let attempt = 0; attempt < attempts && !ready; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
     const params = new URLSearchParams({ fields: 'status_code', access_token });
     const { status_code } = await call(`${graphUrl(config, container.id)}?${params}`);
-    if (status_code === 'FINISHED') break;
     if (status_code === 'ERROR' || status_code === 'EXPIRED') {
-      throw new Error(`Instagram could not process the image (${status_code}). Use a JPEG between 4:5 and 1.91:1.`);
+      throw new Error(
+        videoUrl
+          ? `Instagram could not process the video (${status_code}). Reels need an MP4 between 3 and 90 seconds.`
+          : `Instagram could not process the image (${status_code}). Use a JPEG between 4:5 and 1.91:1.`,
+      );
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    ready = status_code === 'FINISHED';
   }
+  // Publishing an unfinished container fails with a confusing "media not ready" error, and nothing was posted yet.
+  if (!ready) throw new Error(`Instagram is still processing the ${noun}. Nothing was posted; try publishing again in a minute.`);
 
   const published = await call(graphUrl(config, `${userId}/media_publish`), {
     method: 'POST',

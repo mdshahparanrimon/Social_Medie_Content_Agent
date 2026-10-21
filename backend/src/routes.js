@@ -4,14 +4,17 @@ import { httpError } from './errors.js';
 import { getBrand, saveBrand, missingBrandFields } from './brandBrain.js';
 import { planWeek, calendarBrief } from './agents/strategist.js';
 import { createPost, rewritePost, getPost } from './agents/creator.js';
+import { createPostImage, startPostVideo } from './agents/artist.js';
 import { publishPost } from './scheduler.js';
-import { getConfig, getPublicSettings, saveSettings, defaultScheduleTime } from './settings.js';
+import { getConfig, getPublicSettings, saveSettings } from './settings.js';
+import { EDITABLE, approvePost, editPost, setPostImage, unapprovePost } from './posts.js';
 import { platformStatus, testAccount } from './publishers/index.js';
 import { listAccounts } from './accounts.js';
 import { storeImage } from './media.js';
 import { aiStatus, generateJSON } from './llm/index.js';
+import { imageStatus } from './llm/image.js';
+import { videoStatus } from './llm/video.js';
 import { PLATFORMS } from './platforms.js';
-import { requireAdmin } from './auth/session.js';
 
 // Every route here runs behind requireAuth, inside the signed-in user's workspace.
 export const router = Router();
@@ -68,62 +71,19 @@ router.post('/posts/instant', async (req, res) => {
   res.json(created);
 });
 
-function contentChange(post, content) {
-  if (content === undefined || content === post.content) return {};
-  if (!String(content).trim()) throw httpError(400, 'Post content cannot be empty.');
-  return { content: String(content) };
-}
-
-const changed = () => httpError(409, 'This post changed in the meantime. Reload and try again.');
-
-router.patch('/posts/:id', async (req, res) => {
-  const post = await getPost(req.params.id);
-  const editable = ['draft', 'approved', 'failed'];
-  if (!editable.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be edited.`);
-  const updated = await repo.updatePost(post.id, contentChange(post, req.body.content), { onlyIfStatus: editable });
-  if (!updated) throw changed();
-  res.json(updated);
-});
+router.patch('/posts/:id', async (req, res) => res.json(await editPost(req.params.id, req.body.content)));
 
 router.post('/posts/:id/approve', async (req, res) => {
-  const post = await getPost(req.params.id);
-  if (!['draft', 'failed'].includes(post.status)) throw httpError(409, `A ${post.status} post cannot be approved.`);
-  if (PLATFORMS[post.platform].needsImage && !post.image_url) {
-    throw httpError(400, `${PLATFORMS[post.platform].label} posts need an image. Add one before approving.`);
-  }
-
-  let scheduledAt;
-  if (req.body.scheduledAt) {
-    const when = new Date(req.body.scheduledAt);
-    if (Number.isNaN(when.getTime())) throw httpError(400, 'Invalid schedule time.');
-    if (when.getTime() < Date.now() - 60_000) throw httpError(400, 'That time is in the past. Pick a future time or use Publish now.');
-    scheduledAt = when.toISOString();
-  } else {
-    const item = post.calendar_item_id ? await repo.getCalendarItem(post.calendar_item_id) : null;
-    scheduledAt = await defaultScheduleTime(post.platform, item?.date);
-  }
-
-  const updated = await repo.updatePost(
-    post.id,
-    { ...contentChange(post, req.body.content), status: 'approved', scheduled_at: scheduledAt, error: null },
-    { onlyIfStatus: ['draft', 'failed'] },
-  );
-  if (!updated) throw changed();
-  res.json(updated);
+  res.json(await approvePost(req.params.id, { content: req.body.content, scheduledAt: req.body.scheduledAt }));
 });
 
-router.post('/posts/:id/unapprove', async (req, res) => {
-  const post = await getPost(req.params.id);
-  const updated = await repo.updatePost(post.id, { status: 'draft', scheduled_at: null }, { onlyIfStatus: ['approved', 'failed'] });
-  if (!updated) throw httpError(409, `A ${post.status} post cannot go back to draft.`);
-  res.json(updated);
-});
+router.post('/posts/:id/unapprove', async (req, res) => res.json(await unapprovePost(req.params.id)));
 
 // Attach an image: { dataUrl } for an upload (JPEG), or { url } for an image that's already online.
 router.put('/posts/:id/image', async (req, res) => {
+  // Check the post first, so an image isn't uploaded for a post that can't take it.
   const post = await getPost(req.params.id);
-  const editable = ['draft', 'approved', 'failed'];
-  if (!editable.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
   let imageUrl;
   if (req.body.dataUrl) {
     imageUrl = await storeImage(req.body.dataUrl);
@@ -132,17 +92,42 @@ router.put('/posts/:id/image', async (req, res) => {
   } else {
     throw httpError(400, 'Upload an image or paste an image link starting with https://');
   }
-  const updated = await repo.updatePost(post.id, { image_url: imageUrl }, { onlyIfStatus: editable });
-  if (!updated) throw changed();
-  res.json(updated);
+  res.json(await setPostImage(req.params.id, imageUrl));
+});
+
+// Make an image with AI from the post (and optional instructions) and attach it.
+router.post('/posts/:id/image/generate', async (req, res) => {
+  res.json(await createPostImage(req.params.id, { instructions: req.body.instructions }));
 });
 
 router.delete('/posts/:id/image', async (req, res) => {
   const post = await getPost(req.params.id);
   // An approved Instagram post without an image couldn't be published, so only drafts can lose theirs.
   const editable = PLATFORMS[post.platform].needsImage ? ['draft', 'failed'] : ['draft', 'approved', 'failed'];
-  const updated = await repo.updatePost(post.id, { image_url: null }, { onlyIfStatus: editable });
+  const updated = await repo.updatePost(post.id, { image_url: null, image_prompt: null }, { onlyIfStatus: editable });
   if (!updated) throw httpError(409, 'Move the post back to draft before removing its image.');
+  res.json(updated);
+});
+
+// One post, e.g. to follow a video that's being made (video_status).
+router.get('/posts/:id', async (req, res) => res.json(await getPost(req.params.id)));
+
+// Start making a video with AI. Returns at once with video_status 'generating'; poll GET /posts/:id.
+router.post('/posts/:id/video/generate', async (req, res) => {
+  res.json(await startPostVideo(req.params.id, { instructions: req.body.instructions }));
+});
+
+router.delete('/posts/:id/video', async (req, res) => {
+  const post = await getPost(req.params.id);
+  if (post.video_status === 'generating') throw httpError(409, 'Wait until the video is finished, then remove it.');
+  // Instagram needs an image or a video, so an approved one can't drop its only media.
+  const editable = PLATFORMS[post.platform].needsImage && !post.image_url ? ['draft', 'failed'] : EDITABLE;
+  const updated = await repo.updatePost(
+    post.id,
+    { video_url: null, video_prompt: null, video_status: null, video_error: null },
+    { onlyIfStatus: editable },
+  );
+  if (!updated) throw httpError(409, 'Move the post back to draft before removing its video.');
   res.json(updated);
 });
 
@@ -167,7 +152,17 @@ router.get('/settings', async (req, res) => res.json(await getPublicSettings({ a
 router.put('/settings', async (req, res) => res.json(await saveSettings(req.body, { admin: isAdmin(req) })));
 
 // Always answers 200 with { ok, message }.
-router.post('/settings/test/ai', requireAdmin, async (req, res) => {
+// Tests this workspace's own AI key.
+router.post('/settings/test/ai', async (req, res) => {
+  const config = await getConfig();
+  // With MCP the app calls no AI; the real test is asking Claude in claude.ai.
+  if (config.ai_provider === 'mcp') {
+    return res.json(
+      config.mcp_token_hash
+        ? { ok: true, message: 'Connector URL is active. In claude.ai, ask: "Show my brand brain from Content Agent".' }
+        : { ok: false, message: 'Create the connector URL first, then add it in claude.ai.' },
+    );
+  }
   try {
     await generateJSON({
       task: 'connection-test',
@@ -206,6 +201,8 @@ router.get('/status', async (req, res) => {
   ]);
   res.json({
     ai: aiStatus(config),
+    images: imageStatus(config),
+    videos: videoStatus(config),
     brandMissing: missingBrandFields(brand),
     dryRun: config.dry_run,
     platforms: platformStatus(config, accounts),

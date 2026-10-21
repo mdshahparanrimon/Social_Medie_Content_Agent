@@ -6,6 +6,7 @@ import { api, formatDateTime, PLATFORMS } from '@/lib/api';
 import { Button, ButtonLink, Card, PlatformBadge } from '@/components/ui';
 import { Icon } from '@/components/Nav';
 import { useAuth } from '@/components/auth';
+import AIUsage from '@/components/AIUsage';
 
 function greeting() {
   const h = new Date().getHours();
@@ -160,8 +161,8 @@ function Setup({ status, anyLive, isAdmin }) {
     {
       ok: ai.ready,
       title: 'Connect an AI provider',
-      detail: ai.ready ? `${ai.label} · ${ai.model}` : isAdmin ? 'Add an API key to start writing' : 'Writing is not available yet',
-      href: isAdmin ? '/settings' : null,
+      detail: ai.ready ? `${ai.label} · ${ai.model}` : 'Add your API key to start writing',
+      href: '/settings#ai',
       cta: 'Settings',
     },
     {
@@ -206,9 +207,9 @@ function channelState(p) {
 
 function Channels({ platforms }) {
   return (
-    <Card className="lg:col-span-2">
+    <Card>
       <SectionTitle action={<MoreLink href="/connections">Manage</MoreLink>}>Channels</SectionTitle>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {Object.entries(platforms).map(([key, p]) => {
           const s = channelState(p);
           return (
@@ -234,35 +235,10 @@ function Channels({ platforms }) {
   );
 }
 
-function Usage({ ai, usage }) {
-  const rows = [
-    ['Provider', ai.label],
-    ['Model', ai.model || '—'],
-    ['AI calls', usage.calls.toLocaleString()],
-    ['Tokens', (usage.input_tokens + usage.output_tokens).toLocaleString()],
-  ];
-  return (
-    <Card>
-      <SectionTitle>AI usage</SectionTitle>
-      <div className="mb-4 rounded-lg bg-zinc-50 px-4 py-3">
-        <div className="text-xs text-zinc-500">Claude cost estimate</div>
-        <div className="font-serif text-2xl font-semibold tabular-nums text-zinc-900">${usage.cost_usd.toFixed(2)}</div>
-      </div>
-      <dl className="space-y-2 text-sm">
-        {rows.map(([k, v]) => (
-          <div key={k} className="flex justify-between gap-3">
-            <dt className="text-zinc-500">{k}</dt>
-            <dd className="truncate font-medium text-zinc-900">{v}</dd>
-          </div>
-        ))}
-      </dl>
-    </Card>
-  );
-}
-
 function Skeleton() {
   return (
     <div className="animate-pulse space-y-6">
+      <div className="h-64 rounded-xl bg-zinc-200" />
       <div className="h-16 w-72 rounded-lg bg-zinc-200" />
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
@@ -302,7 +278,7 @@ export default function Dashboard() {
     );
   if (!status) return <Skeleton />;
 
-  const { counts, platforms, usage, upcoming, ai } = status;
+  const { counts, platforms, usage, upcoming, ai, images } = status;
   const values = {
     draft: counts.draft || 0,
     scheduled: (counts.approved || 0) + (counts.publishing || 0),
@@ -314,6 +290,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <AIUsage ai={ai} images={images} videos={status.videos} usage={usage} manageHref="/settings#ai" />
+
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-sm text-zinc-500">{today}</p>
@@ -364,10 +342,7 @@ export default function Dashboard() {
         <Setup status={status} anyLive={anyLive} isAdmin={isAdmin} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Channels platforms={platforms} />
-        <Usage ai={ai} usage={usage} />
-      </div>
+      <Channels platforms={platforms} />
     </div>
   );
 }

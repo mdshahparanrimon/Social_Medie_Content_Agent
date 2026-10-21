@@ -5,9 +5,11 @@ import { parseJSON, checkSchema } from './json.js';
 import * as gemini from './gemini.js';
 import * as openaiCompat from './openaiCompat.js';
 import * as anthropic from './anthropic.js';
+import * as mcp from './mcp.js';
 
 // The AI provider is chosen in Settings; every agent goes through generateJSON.
-const PROVIDERS = { gemini, openai_compat: openaiCompat, anthropic };
+// mcp has no `complete`: with it, Claude writes from claude.ai instead of the app calling an AI.
+const PROVIDERS = { gemini, openai_compat: openaiCompat, anthropic, mcp };
 
 export function aiStatus(config) {
   const provider = PROVIDERS[config.ai_provider];
@@ -23,6 +25,7 @@ export function aiStatus(config) {
 export async function generateJSON({ task, system, prompt, schema, effort = 'medium' }) {
   const config = await getConfig();
   const provider = PROVIDERS[config.ai_provider];
+  if (!provider.complete) throw httpError(400, provider.unavailable);
   if (!provider.isConfigured(config)) {
     throw httpError(400, `${provider.label} is not set up yet. Add its API key in Settings → AI.`);
   }

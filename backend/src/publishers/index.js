@@ -33,9 +33,10 @@ export function platformStatus(config, accounts) {
 export async function publishToPlatform(post) {
   const publisher = PUBLISHERS[post.platform];
   if (!publisher) throw new Error(`Unknown platform: ${post.platform}`);
-  if (PLATFORMS[post.platform].needsImage && !post.image_url) {
-    throw new Error(`${PLATFORMS[post.platform].label} posts need an image.`);
+  if (PLATFORMS[post.platform].needsImage && !post.image_url && !post.video_url) {
+    throw new Error(`${PLATFORMS[post.platform].label} posts need an image or a video.`);
   }
+  if (post.video_status === 'generating') throw new Error('The video is still being made. Publish once it is ready.');
   const [config, account] = await Promise.all([getConfig(), getAccount(post.platform)]);
   if (config.dry_run || !account) {
     return { simulated: true, externalId: `simulated-${Date.now()}`, url: null };
@@ -45,7 +46,8 @@ export async function publishToPlatform(post) {
   }
   return {
     simulated: false,
-    ...(await publisher.publish({ text: post.content, imageUrl: post.image_url, account, config })),
+    // A post with a video goes out as a video post; the image is used only when there's no video.
+    ...(await publisher.publish({ text: post.content, imageUrl: post.video_url ? null : post.image_url, videoUrl: post.video_url || null, account, config })),
   };
 }
 
