@@ -4,13 +4,15 @@ export const apiUrl = (path) => `/api${path}`;
 // Fired when a request finds the session gone (signed out elsewhere, expired); the app then shows the login page.
 export const AUTH_EXPIRED_EVENT = 'auth:expired';
 
+// body: an object (sent as JSON), or a File/Blob (sent as-is with its own type, e.g. a PDF upload).
 export async function api(path, { method = 'GET', body } = {}) {
+  const file = typeof Blob !== 'undefined' && body instanceof Blob;
   let res;
   try {
     res = await fetch(apiUrl(path), {
       method,
-      headers: body ? { 'Content-Type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      headers: body ? { 'Content-Type': file ? body.type || 'application/octet-stream' : 'application/json' } : undefined,
+      body: body ? (file ? body : JSON.stringify(body)) : undefined,
       credentials: 'same-origin',
     });
   } catch {
@@ -33,7 +35,7 @@ export async function api(path, { method = 'GET', body } = {}) {
 // Keep in sync with backend/src/platforms.js
 export const PLATFORMS = {
   x: { label: 'X', maxChars: 280 },
-  linkedin: { label: 'LinkedIn', maxChars: 3000 },
+  linkedin: { label: 'LinkedIn', maxChars: 3000, documents: true },
   meta: { label: 'Facebook', maxChars: 5000 },
   instagram: { label: 'Instagram', maxChars: 2200, needsImage: true },
 };

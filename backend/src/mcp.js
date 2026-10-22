@@ -11,8 +11,11 @@ import { getConfig } from './settings.js';
 import { getBrand, saveBrand, brandContext, missingBrandFields } from './brandBrain.js';
 import { FORMATS } from './agents/strategist.js';
 import { getPost } from './agents/creator.js';
-import { approvePost, editPost, setPostImage, unapprovePost } from './posts.js';
+import { EDITABLE, approvePost, editPost, setPostDocument, setPostImage, setPostVideo, unapprovePost } from './posts.js';
+import { MAX_DOCUMENT_BYTES, importDocument, importImage, importVideo } from './media.js';
 import { createPostImage, startPostVideo } from './agents/artist.js';
+import { MAX_SLIDES, MIN_SLIDES, SLIDE_RULES, createPostCarousel } from './agents/carousel.js';
+import { MAX_PDF_PAGES } from './slides.js';
 import { PLATFORMS, PLATFORM_KEYS, charCount } from './platforms.js';
 import { API_URL } from './urls.js';
 
@@ -26,23 +29,43 @@ const connectorUrl = (token) => `${API_URL}/mcp/${token}`;
 // ---- Connector URL management (dashboard, signed in) ----
 export const mcpTokenRouter = Router();
 
+const noActivity = { mcp_last_used_at: null, mcp_last_client: null, mcp_last_tool: null };
+
 mcpTokenRouter.get('/', async (req, res) => {
   const config = await getConfig();
-  res.json({ active: Boolean(config.mcp_token_hash), created_at: config.mcp_token_created_at || null });
+  res.json({
+    active: Boolean(config.mcp_token_hash),
+    created_at: config.mcp_token_created_at || null,
+    last_used_at: config.mcp_last_used_at || null,
+    last_client: config.mcp_last_client || null,
+    last_tool: config.mcp_last_tool || null,
+  });
 });
 
 // Creates the URL, or replaces it (the old one stops working). The full URL is only shown this once.
 mcpTokenRouter.post('/', async (req, res) => {
   const token = `ca_${crypto.randomBytes(32).toString('base64url')}`;
   const created_at = new Date().toISOString();
-  await repo.saveWorkspaceSettings({ mcp_token_hash: hashToken(token), mcp_token_created_at: created_at });
+  await repo.saveWorkspaceSettings({ mcp_token_hash: hashToken(token), mcp_token_created_at: created_at, ...noActivity });
   res.json({ active: true, created_at, url: connectorUrl(token) });
 });
 
 mcpTokenRouter.delete('/', async (req, res) => {
-  await repo.saveWorkspaceSettings({ mcp_token_hash: null, mcp_token_created_at: null });
+  await repo.saveWorkspaceSettings({ mcp_token_hash: null, mcp_token_created_at: null, ...noActivity });
   res.json({ active: false, created_at: null });
 });
+
+// Remembers Claude's handshake (which client connected) and tool calls; other requests (pings, tool lists) aren't saved.
+async function recordActivity(body) {
+  if (!body || Array.isArray(body)) return;
+  const now = new Date().toISOString();
+  if (body.method === 'initialize') {
+    const client = body.params?.clientInfo?.name;
+    await repo.saveWorkspaceSettings({ mcp_last_used_at: now, ...(client && { mcp_last_client: String(client).slice(0, 80) }) });
+  } else if (body.method === 'tools/call') {
+    await repo.saveWorkspaceSettings({ mcp_last_used_at: now, mcp_last_tool: String(body.params?.name || '').slice(0, 80) });
+  }
+}
 
 // ---- Tools ----
 const INSTRUCTIONS = `Content Agent plans, stores and publishes social media posts for the user's brand.
@@ -62,8 +85,15 @@ const safe = (fn) => async (args) => {
 };
 
 function postSummary(post) {
-  const { id, platform, status, content, image_url, image_prompt, video_url, video_status, video_error, scheduled_at, published_at, external_url, error, calendar_item_id, created_at } = post;
-  return { id, platform, status, content, image_url, image_prompt, video_url, video_status, video_error, scheduled_at, published_at, external_url, error, calendar_item_id, created_at };
+  const { id, platform, status, content, image_url, image_prompt, video_url, video_status, video_error, document_url, document_title, document_pages, scheduled_at, published_at, external_url, error, calendar_item_id, created_at } = post;
+  return { id, platform, status, content, image_url, image_prompt, video_url, video_status, video_error, document_url, document_title, document_pages, scheduled_at, published_at, external_url, error, calendar_item_id, created_at };
+}
+
+// Checked before downloading media from a link, so nothing is stored for a post that can't take it.
+async function editablePost(id) {
+  const post = await getPost(id);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  return post;
 }
 
 function checkLength(platform, content) {
@@ -95,8 +125,10 @@ async function writingGuide() {
     '- Writing: write in the brand voice for its audience. Be specific and useful; avoid clichés, filler and generic AI phrasing. Never invent statistics, quotes or facts about the brand.',
     '- Before saving, review your draft like a strict brand editor (voice, audience fit, hook, platform rules, forbidden topics) and revise it until it is ready to publish.',
     '- Saving: create_post (with calendar_item_id when it comes from the calendar). Put only the final post text in content, exactly as it should be published.',
-    '- Images: every platform can post one image. Instagram needs one before scheduling. Make it with generate_post_image, or attach a public https link with set_post_image. Ask the user before making images unless they asked for them.',
-    '- Videos: generate_post_video starts a short AI video (16:9, or 9:16 for Instagram Reels and Facebook) and returns at once; it takes 1-3 minutes. Check it with list_posts (video_status: generating, ready, failed). A post with a video is published as a video. Ask the user before making videos unless they asked for them.',
+    '- Images: every platform can post one image. Instagram needs one before scheduling. Make it with generate_post_image, or attach a public https link (Google Drive share links work) with set_post_image. Ask the user before making images unless they asked for them.',
+    '- Videos: attach a finished video from a public https link (Google Drive share links work) with set_post_video. Or generate_post_video starts a short AI video (16:9, or 9:16 for Instagram Reels and Facebook) and returns at once; it takes 1-3 minutes. Check it with list_posts (video_status: generating, ready, failed). A post with a video is published as a video. Ask the user before making AI videos unless they asked for them.',
+    `- LinkedIn PDF carousels (document posts): write the slides yourself and call generate_post_carousel; the app draws them on brand-colored slides. Or attach a finished PDF from a public https link with set_post_document. The post text is the caption. A carousel wins over an image or video on LinkedIn. Slide rules:\n${SLIDE_RULES}`,
+    '- Files from Google Drive: when the user made images, videos or PDFs and saved them to Drive, attach each with set_post_image, set_post_video or set_post_document using its Drive link. With Google Drive connected in the app (Connections), private files work; otherwise the file must be shared as "Anyone with the link". A Google Slides link attached with set_post_document becomes a PDF carousel. If a download fails, pass on the error to the user.',
     '- Times are ISO 8601. Without scheduled_at, schedule_post uses the platform\'s default posting time.',
     '',
     '# Brand Brain fields (raw)',
@@ -247,11 +279,32 @@ function buildServer() {
     'set_post_image',
     {
       title: 'Set a post image',
-      description: 'Attach an image by its public https link (required for Instagram). Use JPEG between 4:5 and 1.91:1 for Instagram.',
+      description:
+        'Attach an image from a public https link, e.g. a Google Drive file shared as "Anyone with the link" (required for Instagram). ' +
+        'It is downloaded and saved as JPEG, replacing any image. For Instagram, use an aspect ratio between 4:5 and 1.91:1.',
       inputSchema: { id: z.string(), image_url: z.string().url().startsWith('https://') },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    safe(async ({ id, image_url }) => text(postSummary(await setPostImage(id, image_url)))),
+    safe(async ({ id, image_url }) => {
+      await editablePost(id);
+      return text(postSummary(await setPostImage(id, await importImage(image_url))));
+    }),
+  );
+
+  server.registerTool(
+    'set_post_video',
+    {
+      title: 'Set a post video',
+      description:
+        'Attach a finished MP4 or MOV video (up to 100 MB) from a public https link, e.g. a Google Drive file shared as "Anyone with the link". ' +
+        'It is downloaded and saved, replacing any video; the post is then published as a video (a Reel on Instagram, 3-90 seconds).',
+      inputSchema: { id: z.string(), video_url: z.string().url().startsWith('https://') },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    safe(async ({ id, video_url }) => {
+      await editablePost(id);
+      return text(postSummary(await setPostVideo(id, await importVideo(video_url))));
+    }),
   );
 
   server.registerTool(
@@ -278,6 +331,50 @@ function buildServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     safe(async ({ id, prompt }) => text(postSummary(await startPostVideo(id, { prompt })))),
+  );
+
+  server.registerTool(
+    'generate_post_carousel',
+    {
+      title: 'Make a LinkedIn PDF carousel',
+      description:
+        'Turn slides you write into a PDF carousel (cover, one idea per slide, closing call to action) and attach it to a LinkedIn post, replacing any carousel. ' +
+        'The app draws the slides with slide numbers and the brand name; it calls no AI. Follow the slide rules in get_writing_guide.',
+      inputSchema: {
+        id: z.string(),
+        title: z.string().min(1).max(100).describe('Document title shown above the carousel on LinkedIn'),
+        accent_color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().describe('Brand color for the slides, e.g. #0a66c2 (dark enough for white text)'),
+        slides: z
+          .array(z.object({ heading: z.string().min(1), body: z.string().default('') }))
+          .min(MIN_SLIDES)
+          .max(MAX_SLIDES)
+          .describe('First = cover, last = closing slide with the call to action'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    safe(async ({ id, title, accent_color, slides }) => text(postSummary(await createPostCarousel(id, { title, slides, accent: accent_color })))),
+  );
+
+  server.registerTool(
+    'set_post_document',
+    {
+      title: 'Set a LinkedIn PDF carousel',
+      description:
+        `Attach a finished PDF (up to ${MAX_DOCUMENT_BYTES / 1024 / 1024} MB, ${MAX_PDF_PAGES} pages) from a public https link, e.g. a Google Drive file shared as "Anyone with the link", to a LinkedIn post. ` +
+        'It is downloaded and saved, replacing any carousel.',
+      inputSchema: {
+        id: z.string(),
+        document_url: z.string().url().startsWith('https://'),
+        title: z.string().min(1).max(100).optional().describe("Document title shown above the carousel on LinkedIn (default: the file's name)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    safe(async ({ id, document_url, title }) => {
+      const post = await editablePost(id);
+      if (!PLATFORMS[post.platform].documents) throw httpError(400, `${PLATFORMS[post.platform].label} posts can't carry a PDF carousel.`);
+      const doc = await importDocument(document_url);
+      return text(postSummary(await setPostDocument(id, { url: doc.url, title: title || doc.filename || 'Carousel', pages: doc.pages })));
+    }),
   );
 
   server.registerTool(
@@ -329,6 +426,7 @@ mcpRouter.post('/:token', async (req, res) => {
   rateLimit(`mcp:${workspaceId}`, 300, 60_000);
 
   await runInWorkspace(workspaceId, async () => {
+    await recordActivity(req.body).catch((err) => console.error('MCP activity not saved:', err.message));
     const server = buildServer();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {

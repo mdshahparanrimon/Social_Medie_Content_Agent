@@ -6,6 +6,7 @@ import { saveAccount, removeAccount, listAccounts } from './accounts.js';
 import { PUBLISHERS } from './publishers/index.js';
 import { fetchProfile as linkedinProfile } from './publishers/linkedin.js';
 import { fetchProfile as instagramProfile } from './publishers/instagram.js';
+import { DRIVE, DRIVE_SCOPES, driveAppReady, exchangeCode as exchangeDriveCode } from './drive.js';
 import { httpError } from './errors.js';
 import { API_URL, FRONTEND_URL } from './urls.js';
 import { runInWorkspace, workspaceId } from './context.js';
@@ -219,7 +220,37 @@ const PROVIDERS = {
       return { message: `Connected as @${me.username}` };
     },
   },
+
+  // Not a place to post: read-only Drive access, so post media can be added from private Drive links.
+  [DRIVE]: {
+    appReady: driveAppReady,
+    setupHint: 'Add the Google Client ID and Secret in Settings → Sign-in & email first.',
+    async start(config) {
+      const params = new URLSearchParams({
+        client_id: config.google_client_id,
+        redirect_uri: callbackUrl(DRIVE),
+        response_type: 'code',
+        scope: DRIVE_SCOPES,
+        // offline + consent: Google sends a refresh token, so access lasts beyond the first hour.
+        access_type: 'offline',
+        prompt: 'consent',
+        include_granted_scopes: 'true',
+        state: remember(newState(), DRIVE),
+      });
+      return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+    },
+    async finish(config, query) {
+      if (query.error) throw new Error(query.error === 'access_denied' ? 'You cancelled the Google login.' : `Google: ${query.error}`);
+      take(query.state, DRIVE);
+      const account = await exchangeDriveCode(config, query.code, callbackUrl(DRIVE));
+      await saveAccount(DRIVE, account);
+      return { message: `Connected to the Drive of ${account.email || account.name}` };
+    },
+  },
 };
+
+// Social platforms are ready once their developer app is set up; Drive uses the Google sign-in client.
+const appReady = (platform, config) => (PROVIDERS[platform].appReady || PUBLISHERS[platform].appReady)(config);
 
 async function savePage(page) {
   await saveAccount('meta', {
@@ -252,7 +283,7 @@ oauthRouter.get('/info', requireAuth, async (req, res) => {
     Object.fromEntries(
       Object.keys(PROVIDERS).map((platform) => [
         platform,
-        { callback_url: callbackUrl(platform), app_ready: PUBLISHERS[platform].appReady(config) },
+        { callback_url: callbackUrl(platform), app_ready: appReady(platform, config) },
       ]),
     ),
   );
@@ -276,7 +307,7 @@ oauthRouter.get('/:platform/start', requireAuth, async (req, res) => {
   const { start, setupHint } = provider(platform);
   try {
     const config = await getConfig();
-    if (!PUBLISHERS[platform].appReady(config)) throw new Error(setupHint);
+    if (!appReady(platform, config)) throw new Error(setupHint);
     res.redirect(await start(config));
   } catch (err) {
     res.redirect(backToConnections(platform, { error: err.message }));

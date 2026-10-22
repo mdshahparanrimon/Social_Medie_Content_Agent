@@ -1,4 +1,4 @@
-import { loadImageJpeg, loadVideo } from '../media.js';
+import { loadDocument, loadImageJpeg, loadVideo } from '../media.js';
 
 // Posts to your personal LinkedIn profile. Tokens last 60 days and can't be refreshed without
 // LinkedIn partner approval, so you reconnect when it expires.
@@ -72,7 +72,28 @@ async function uploadVideo({ videoUrl, author, account, config }) {
   return video;
 }
 
-export async function publish({ text, imageUrl, videoUrl, account, config }) {
+// Documents API (PDF carousels): same flow as images, a single PUT of the whole file.
+async function uploadDocument({ documentUrl, author, account, config }) {
+  const init = await fetch('https://api.linkedin.com/rest/documents?action=initializeUpload', {
+    method: 'POST',
+    headers: headers(account, config),
+    body: JSON.stringify({ initializeUploadRequest: { owner: author } }),
+  });
+  const data = await init.json().catch(() => ({}));
+  if (!init.ok || !data.value?.uploadUrl) {
+    throw new Error(`LinkedIn PDF upload (${init.status}): ${data.message || 'could not start the upload'}`);
+  }
+  const put = await fetch(data.value.uploadUrl, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${account.credentials.access_token}`, 'Content-Type': 'application/pdf' },
+    body: await loadDocument(documentUrl),
+  });
+  if (!put.ok) throw new Error(`LinkedIn PDF upload (${put.status}): the PDF was rejected.`);
+  return data.value.document;
+}
+
+// One media per post: a PDF carousel wins over a video, a video over an image.
+export async function publish({ text, imageUrl, videoUrl, documentUrl, documentTitle, account, config }) {
   const author = `urn:li:person:${account.external_id}`;
   const body = {
     author,
@@ -82,7 +103,10 @@ export async function publish({ text, imageUrl, videoUrl, account, config }) {
     lifecycleState: 'PUBLISHED',
     isReshareDisabledByAuthor: false,
   };
-  if (videoUrl) body.content = { media: { id: await uploadVideo({ videoUrl, author, account, config }) } };
+  if (documentUrl) {
+    const id = await uploadDocument({ documentUrl, author, account, config });
+    body.content = { media: { title: documentTitle || 'Carousel', id } };
+  } else if (videoUrl) body.content = { media: { id: await uploadVideo({ videoUrl, author, account, config }) } };
   else if (imageUrl) body.content = { media: { id: await uploadImage({ imageUrl, author, account, config }) } };
 
   const res = await fetch('https://api.linkedin.com/rest/posts', {

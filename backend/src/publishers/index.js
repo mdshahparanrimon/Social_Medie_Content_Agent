@@ -47,7 +47,16 @@ export async function publishToPlatform(post) {
   return {
     simulated: false,
     // A post with a video goes out as a video post; the image is used only when there's no video.
-    ...(await publisher.publish({ text: post.content, imageUrl: post.video_url ? null : post.image_url, videoUrl: post.video_url || null, account, config })),
+    // A PDF carousel (LinkedIn) wins over both; the publisher picks it.
+    ...(await publisher.publish({
+      text: post.content,
+      imageUrl: post.video_url ? null : post.image_url,
+      videoUrl: post.video_url || null,
+      documentUrl: (PLATFORMS[post.platform].documents && post.document_url) || null,
+      documentTitle: post.document_title || null,
+      account,
+      config,
+    })),
   };
 }
 

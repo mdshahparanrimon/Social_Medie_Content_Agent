@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { Card, ErrorText, PageHeader } from '@/components/ui';
+import { Card, ErrorText, ExpandAll, PageHeader } from '@/components/ui';
 import PostCard from '@/components/PostCard';
 
 const TABS = [
@@ -19,6 +19,7 @@ function PostsView() {
   const tab = TABS.find((t) => t.key === tabKey) || TABS[0];
   const [posts, setPosts] = useState(null);
   const [error, setError] = useState('');
+  const [expand, setExpand] = useState(null);
 
   useEffect(() => {
     api('/posts').then(setPosts).catch((err) => setError(err.message));
@@ -65,8 +66,11 @@ function PostsView() {
         <Card className="py-10 text-center text-sm text-zinc-500">Nothing here.</Card>
       ) : (
         <div className="space-y-4">
+          <div className="flex justify-end">
+            <ExpandAll onChange={setExpand} />
+          </div>
           {visible.map((post) => (
-            <PostCard key={post.id} post={post} onUpdate={update} onRemove={remove} />
+            <PostCard key={post.id} post={post} onUpdate={update} onRemove={remove} expand={expand} />
           ))}
         </div>
       )}

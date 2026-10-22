@@ -5,13 +5,21 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, apiUrl, PLATFORMS } from '@/lib/api';
 import { Button, Card, ErrorText, PageHeader, PlatformBadge } from '@/components/ui';
 import { useAuth } from '@/components/auth';
+import { notify } from '@/lib/notify';
 
 const NOTES = {
-  x: 'Posts as text.',
-  linkedin: 'Posts to your personal profile. LinkedIn asks you to reconnect every 60 days.',
-  meta: 'Posts to a Facebook Page (Meta does not allow posting to personal profiles). Adds the image when a post has one.',
-  instagram: 'Needs a Professional (Creator or Business) account. Every post needs an image. Stays connected automatically.',
+  x: 'Posts text, with the image or video when a post has one.',
+  linkedin: 'Posts to your personal profile, with an image, video or PDF carousel. LinkedIn asks you to reconnect every 60 days.',
+  meta: 'Posts to a Facebook Page (Meta does not allow posting to personal profiles), with the image or video when a post has one.',
+  instagram: 'Needs a Professional (Creator or Business) account. Every post needs an image or a video. Stays connected automatically.',
+  google_drive:
+    'Read-only access to your Drive. Then paste Drive links of images, videos and PDFs (in a post, or via Claude) without making the files public. Google Slides links become PDF carousels.',
 };
+
+// Connections that aren't places to post: where post media comes from. `setup` is the Settings section to set them up in.
+const FILE_SOURCES = { google_drive: { label: 'Google Drive', setup: 'signin', setupLabel: 'set up Google sign-in' } };
+
+const labelOf = (key) => PLATFORMS[key]?.label || FILE_SOURCES[key]?.label || key;
 
 function daysUntil(iso) {
   return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
@@ -32,8 +40,8 @@ function Avatar({ account }) {
 function PlatformCard({ platform, account, info, onChange }) {
   const { isAdmin } = useAuth();
   const [busy, setBusy] = useState(null);
-  const [result, setResult] = useState(null);
-  const label = PLATFORMS[platform].label;
+  const label = labelOf(platform);
+  const source = FILE_SOURCES[platform];
   const connect = () => {
     setBusy('connect');
     window.location.href = apiUrl(`/oauth/${platform}/start`);
@@ -41,16 +49,17 @@ function PlatformCard({ platform, account, info, onChange }) {
 
   async function run(kind) {
     setBusy(kind);
-    setResult(null);
     try {
       if (kind === 'test') {
-        setResult(await api(`/accounts/${platform}/test`, { method: 'POST' }));
+        const result = await api(`/accounts/${platform}/test`, { method: 'POST' });
+        notify({ ...result, message: `${label}: ${result.message}` });
       } else {
         await api(`/oauth/${platform}/disconnect`, { method: 'POST' });
+        notify({ ok: true, message: `${label} disconnected` });
         onChange();
       }
     } catch (err) {
-      setResult({ ok: false, message: err.message });
+      notify({ ok: false, message: err.message });
     }
     setBusy(null);
   }
@@ -61,7 +70,11 @@ function PlatformCard({ platform, account, info, onChange }) {
   return (
     <Card className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
-        <PlatformBadge platform={platform} />
+        {source ? (
+          <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">{label}</span>
+        ) : (
+          <PlatformBadge platform={platform} />
+        )}
         {account && (
           <span className={`text-xs font-medium ${expired || account.status === 'error' ? 'text-red-600' : 'text-emerald-700'}`}>
             {expired ? 'Expired' : account.status === 'error' ? 'Needs attention' : 'Connected'}
@@ -94,8 +107,8 @@ function PlatformCard({ platform, account, info, onChange }) {
         ) : !account && info && !info.app_ready ? (
           <p className="text-sm">
             One-time setup needed:{' '}
-            <Link href={`/settings#${platform}`} className="font-medium text-accent-600 hover:underline">
-              set up the {label} app →
+            <Link href={`/settings#${source?.setup || platform}`} className="font-medium text-accent-600 hover:underline">
+              {source?.setupLabel || `set up the ${label} app`} →
             </Link>
           </p>
         ) : !account ? (
@@ -116,7 +129,6 @@ function PlatformCard({ platform, account, info, onChange }) {
           </>
         )}
       </div>
-      {result && <p className={`text-sm ${result.ok ? 'text-emerald-700' : 'text-red-600'}`}>{result.message}</p>}
     </Card>
   );
 }
@@ -158,7 +170,6 @@ function PagePicker({ onDone }) {
 export default function ConnectionsPage() {
   const [accounts, setAccounts] = useState(null);
   const [info, setInfo] = useState({});
-  const [notice, setNotice] = useState(null);
   const [choosePage, setChoosePage] = useState(false);
   const [dryRun, setDryRun] = useState(false);
   const [error, setError] = useState('');
@@ -181,11 +192,12 @@ export default function ConnectionsPage() {
     const params = new URLSearchParams(window.location.search);
     const platform = params.get('platform');
     if (platform) {
-      const label = PLATFORMS[platform]?.label || platform;
-      setNotice(
+      const label = labelOf(platform);
+      notify(
         params.get('error')
           ? { ok: false, message: `${label}: ${params.get('error')}` }
           : { ok: true, message: `${label}: ${params.get('message') || 'connected'}` },
+        { id: `oauth-${platform}` },
       );
       setChoosePage(params.get('choose_page') === '1');
       window.history.replaceState(null, '', '/connections');
@@ -201,11 +213,6 @@ export default function ConnectionsPage() {
         description="Connect your accounts with one click: log in on the platform, allow access, done. Platforms you don't connect are simulated."
       />
 
-      {notice && (
-        <p className={`rounded-md px-3 py-2 text-sm ${notice.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>
-          {notice.message}
-        </p>
-      )}
       {dryRun && (
         <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
           Dry run is on: nothing is really posted, even on connected accounts. Turn it off in Settings → Publishing.
@@ -215,7 +222,7 @@ export default function ConnectionsPage() {
         <PagePicker
           onDone={(message) => {
             setChoosePage(false);
-            setNotice({ ok: true, message: `Facebook: ${message}` });
+            notify({ ok: true, message: `Facebook: ${message}` });
             load();
           }}
         />
@@ -231,6 +238,18 @@ export default function ConnectionsPage() {
             onChange={load}
           />
         ))}
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-900">Files</h2>
+          <p className="text-sm text-zinc-500">Where post images, videos and PDFs come from. Nothing is posted here.</p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          {Object.keys(FILE_SOURCES).map((key) => (
+            <PlatformCard key={key} platform={key} account={accounts.find((a) => a.platform === key)} info={info[key]} onChange={load} />
+          ))}
+        </div>
       </div>
     </div>
   );

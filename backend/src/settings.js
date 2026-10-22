@@ -28,6 +28,10 @@ export const FIELDS = {
   // internal: managed by the server (mcp.js), never sent to or saved from the browser.
   mcp_token_hash: { workspace: true, internal: true },
   mcp_token_created_at: { workspace: true, internal: true },
+  // Last request from Claude through the connector, so Settings can show that it's really connected.
+  mcp_last_used_at: { workspace: true, internal: true },
+  mcp_last_client: { workspace: true, internal: true },
+  mcp_last_tool: { workspace: true, internal: true },
 
   dry_run: { type: 'boolean', default: false, workspace: true },
   post_time_x: { type: 'time', default: '10:00', workspace: true },
@@ -76,7 +80,7 @@ async function stored() {
 const isWorkspaceField = (key) => Boolean(FIELDS[key]?.workspace);
 const visibleFields = (admin) => Object.entries(FIELDS).filter(([, field]) => !field.internal && (admin || field.workspace));
 
-const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|\[)/i;
+export const PRIVATE_HOST =/^(localhost|.*\.local|.*\.internal|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|\[)/i;
 
 // The server calls this URL, so members may only point it at a public HTTPS address, not the server's own network.
 function checkPublicUrl(value) {

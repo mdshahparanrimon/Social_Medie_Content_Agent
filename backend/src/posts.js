@@ -68,3 +68,31 @@ export async function setPostImage(id, imageUrl, { imagePrompt = null } = {}) {
   if (!updated) throw changed();
   return updated;
 }
+
+// A PDF carousel (LinkedIn only), replacing any the post had. slides/accent: set for AI-made carousels.
+export async function setPostDocument(id, { url, title, pages, slides = null, accent = null }) {
+  const post = await getPost(id);
+  if (!PLATFORMS[post.platform].documents) throw httpError(400, `${PLATFORMS[post.platform].label} posts can't carry a PDF carousel.`);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  const updated = await repo.updatePost(
+    post.id,
+    { document_url: url, document_title: title, document_pages: pages, document_slides: slides, document_accent: accent },
+    { onlyIfStatus: EDITABLE },
+  );
+  if (!updated) throw changed();
+  return updated;
+}
+
+// A finished video (not AI-made), replacing any video the post had.
+export async function setPostVideo(id, videoUrl) {
+  const post = await getPost(id);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  if (post.video_status === 'generating') throw httpError(409, 'A video is being made for this post. Wait until it is finished.');
+  const updated = await repo.updatePost(
+    post.id,
+    { video_url: videoUrl, video_prompt: null, video_status: 'ready', video_error: null },
+    { onlyIfStatus: EDITABLE },
+  );
+  if (!updated) throw changed();
+  return updated;
+}

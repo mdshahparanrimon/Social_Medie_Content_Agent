@@ -1,16 +1,19 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { repo } from './db/index.js';
 import { httpError } from './errors.js';
 import { getBrand, saveBrand, missingBrandFields } from './brandBrain.js';
 import { planWeek, calendarBrief } from './agents/strategist.js';
 import { createPost, rewritePost, getPost } from './agents/creator.js';
 import { createPostImage, startPostVideo } from './agents/artist.js';
+import { createPostCarousel } from './agents/carousel.js';
 import { publishPost } from './scheduler.js';
 import { getConfig, getPublicSettings, saveSettings } from './settings.js';
-import { EDITABLE, approvePost, editPost, setPostImage, unapprovePost } from './posts.js';
+import { EDITABLE, approvePost, editPost, setPostDocument, setPostImage, setPostVideo, unapprovePost } from './posts.js';
 import { platformStatus, testAccount } from './publishers/index.js';
 import { listAccounts } from './accounts.js';
-import { storeImage } from './media.js';
+import { MAX_DOCUMENT_BYTES, MAX_VIDEO_BYTES, importDocument, importImage, importVideo, storeDocument, storeImage, storeVideo } from './media.js';
+import { pdfPageCount } from './slides.js';
+import { DRIVE, testDrive } from './drive.js';
 import { aiStatus, generateJSON } from './llm/index.js';
 import { imageStatus } from './llm/image.js';
 import { videoStatus } from './llm/video.js';
@@ -79,7 +82,8 @@ router.post('/posts/:id/approve', async (req, res) => {
 
 router.post('/posts/:id/unapprove', async (req, res) => res.json(await unapprovePost(req.params.id)));
 
-// Attach an image: { dataUrl } for an upload (JPEG), or { url } for an image that's already online.
+// Attach an image: { dataUrl } for an upload (JPEG), or { url } for a public link (Google Drive share links work).
+// Linked images are downloaded and stored like uploads, so every platform gets a JPEG it can fetch.
 router.put('/posts/:id/image', async (req, res) => {
   // Check the post first, so an image isn't uploaded for a post that can't take it.
   const post = await getPost(req.params.id);
@@ -87,8 +91,8 @@ router.put('/posts/:id/image', async (req, res) => {
   let imageUrl;
   if (req.body.dataUrl) {
     imageUrl = await storeImage(req.body.dataUrl);
-  } else if (/^https?:\/\/\S+$/.test(req.body.url || '')) {
-    imageUrl = req.body.url;
+  } else if (req.body.url) {
+    imageUrl = await importImage(String(req.body.url).trim());
   } else {
     throw httpError(400, 'Upload an image or paste an image link starting with https://');
   }
@@ -117,6 +121,25 @@ router.post('/posts/:id/video/generate', async (req, res) => {
   res.json(await startPostVideo(req.params.id, { instructions: req.body.instructions }));
 });
 
+// Attach a finished video: the raw MP4/MOV file as the request body (Content-Type: video/mp4 or video/quicktime),
+// or JSON { url } for a public link (Google Drive share links work), which is downloaded and stored.
+router.put('/posts/:id/video', express.raw({ type: ['video/mp4', 'video/quicktime'], limit: MAX_VIDEO_BYTES }), async (req, res) => {
+  const post = await getPost(req.params.id);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  if (post.video_status === 'generating') throw httpError(409, 'A video is being made for this post. Wait until it is finished.');
+  let videoUrl;
+  if (Buffer.isBuffer(req.body) && req.body.length) {
+    // MP4 and MOV both start with an "ftyp" box.
+    if (req.body.subarray(4, 8).toString('latin1') !== 'ftyp') throw httpError(400, 'That file is not an MP4 or MOV video.');
+    videoUrl = await storeVideo(req.body);
+  } else if (req.body?.url) {
+    videoUrl = await importVideo(String(req.body.url).trim());
+  } else {
+    throw httpError(400, 'Upload an MP4 or MOV video or paste a video link starting with https://');
+  }
+  res.json(await setPostVideo(post.id, videoUrl));
+});
+
 router.delete('/posts/:id/video', async (req, res) => {
   const post = await getPost(req.params.id);
   if (post.video_status === 'generating') throw httpError(409, 'Wait until the video is finished, then remove it.');
@@ -128,6 +151,45 @@ router.delete('/posts/:id/video', async (req, res) => {
     { onlyIfStatus: editable },
   );
   if (!updated) throw httpError(409, 'Move the post back to draft before removing its video.');
+  res.json(updated);
+});
+
+// ---- PDF carousel (LinkedIn document posts) ----
+// Upload: the raw PDF as the request body (Content-Type: application/pdf), the title in ?title=.
+// Or JSON { url, title? } for a public link (Google Drive share links work); the title defaults to the file's name.
+router.put('/posts/:id/document', express.raw({ type: 'application/pdf', limit: MAX_DOCUMENT_BYTES }), async (req, res) => {
+  const post = await getPost(req.params.id);
+  if (!PLATFORMS[post.platform].documents) throw httpError(400, `${PLATFORMS[post.platform].label} posts can't carry a PDF carousel.`);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  let doc;
+  let title;
+  if (Buffer.isBuffer(req.body) && req.body.length) {
+    const pages = await pdfPageCount(req.body);
+    doc = { url: await storeDocument(req.body), pages };
+    title = req.query.title;
+  } else if (req.body?.url) {
+    doc = await importDocument(String(req.body.url).trim());
+    title = req.body.title || doc.filename;
+  } else {
+    throw httpError(400, 'Upload a PDF file or paste a PDF link starting with https://');
+  }
+  title = String(title || '').trim().slice(0, 100) || 'Carousel';
+  res.json(await setPostDocument(post.id, { url: doc.url, title, pages: doc.pages }));
+});
+
+// Write the slides with AI from the post (and optional instructions), draw them and attach the PDF.
+router.post('/posts/:id/document/generate', async (req, res) => {
+  res.json(await createPostCarousel(req.params.id, { instructions: req.body.instructions }));
+});
+
+router.delete('/posts/:id/document', async (req, res) => {
+  const post = await getPost(req.params.id);
+  const updated = await repo.updatePost(
+    post.id,
+    { document_url: null, document_title: null, document_pages: null, document_slides: null, document_accent: null },
+    { onlyIfStatus: EDITABLE },
+  );
+  if (!updated) throw httpError(409, `A ${post.status} post cannot be changed.`);
   res.json(updated);
 });
 
@@ -183,7 +245,8 @@ router.get('/accounts', async (req, res) => res.json(await listAccounts()));
 
 router.post('/accounts/:platform/test', async (req, res) => {
   try {
-    res.json({ ok: true, message: await testAccount(req.params.platform) });
+    const { platform } = req.params;
+    res.json({ ok: true, message: platform === DRIVE ? await testDrive() : await testAccount(platform) });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }

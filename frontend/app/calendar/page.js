@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { addDays, api, formatDay, mondayOf, ymd } from '@/lib/api';
 import { Button, Card, ErrorText, PageHeader, PlatformBadge, StatusBadge } from '@/components/ui';
 
@@ -40,7 +41,9 @@ export default function CalendarPage() {
     setPlanning(true);
     setError('');
     try {
-      setItems(await api('/calendar/generate', { method: 'POST', body: { weekStart } }));
+      const planned = await api('/calendar/generate', { method: 'POST', body: { weekStart } });
+      setItems(planned);
+      toast.success(`Week planned: ${planned.length} post ideas`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -61,6 +64,7 @@ export default function CalendarPage() {
     setError('');
     try {
       await draft(item);
+      toast.success('Draft written', { description: 'Review it in Posts → Drafts.' });
     } catch (err) {
       setError(err.message);
     }
@@ -70,10 +74,12 @@ export default function CalendarPage() {
   async function draftAll() {
     setError('');
     const queue = [...undrafted];
+    let written = 0;
     for (let i = 0; i < queue.length; i++) {
       setProgress(`Writing draft ${i + 1} of ${queue.length}…`);
       try {
         await draft(queue[i]);
+        written++;
       } catch (err) {
         setError(err.message);
         break;
@@ -81,6 +87,7 @@ export default function CalendarPage() {
       await load();
     }
     setProgress('');
+    if (written) toast.success(`${written} draft${written === 1 ? '' : 's'} written`, { description: 'Review them in Posts → Drafts.' });
     load();
   }
 
@@ -89,6 +96,7 @@ export default function CalendarPage() {
     try {
       await api(`/calendar/${item.id}`, { method: 'DELETE' });
       setItems((list) => list.filter((i) => i.id !== item.id));
+      toast.success('Idea removed');
     } catch (err) {
       setError(err.message);
     }

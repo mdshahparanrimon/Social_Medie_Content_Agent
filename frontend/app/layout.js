@@ -1,6 +1,7 @@
 import './globals.css';
 import AppShell from '@/components/Nav';
 import { themeInitScript } from '@/components/theme';
+import Toaster from '@/components/Toaster';
 
 export const metadata = {
   title: 'Content Agent',
@@ -15,6 +16,7 @@ export default function RootLayout({ children }) {
       </head>
       <body>
         <AppShell>{children}</AppShell>
+        <Toaster />
       </body>
     </html>
   );

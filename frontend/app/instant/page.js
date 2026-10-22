@@ -2,8 +2,9 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { api, PLATFORMS } from '@/lib/api';
-import { Button, Card, ErrorText, PageHeader } from '@/components/ui';
+import { Button, Card, ErrorText, ExpandAll, PageHeader } from '@/components/ui';
 import PostCard from '@/components/PostCard';
 
 const MEDIA = [
@@ -66,6 +67,7 @@ export default function InstantPage() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
+  const [expand, setExpand] = useState(null);
 
   useEffect(() => {
     api('/brand')
@@ -96,6 +98,7 @@ export default function InstantPage() {
     try {
       const created = await api('/posts/instant', { method: 'POST', body: { topic, platforms } });
       setPosts((list) => [...created, ...list]);
+      toast.success(`${created.length} draft${created.length === 1 ? '' : 's'} written`);
 
       // Images one at a time (free tiers rate-limit), each shown as soon as it's ready.
       if (wantImage) {
@@ -123,6 +126,7 @@ export default function InstantPage() {
       problems.push(err.message);
     } finally {
       setError(problems.join('\n'));
+      if (problems.length) toast.error(`${problems.length} problem${problems.length === 1 ? '' : 's'}: see the details on the page`);
       setProgress('');
       setBusy(false);
     }
@@ -203,9 +207,12 @@ export default function InstantPage() {
 
       {posts.length > 0 && (
         <div className="space-y-4">
-          <p className="text-sm text-zinc-500">These drafts are also in Posts → Drafts. Videos keep being made if you leave this page.</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-zinc-500">These drafts are also in Posts → Drafts. Videos keep being made if you leave this page.</p>
+            <ExpandAll onChange={setExpand} />
+          </div>
           {posts.map((post) => (
-            <PostCard key={post.id} post={post} onUpdate={update} onRemove={remove} />
+            <PostCard key={post.id} post={post} onUpdate={update} onRemove={remove} defaultOpen={posts.length === 1} expand={expand} />
           ))}
         </div>
       )}

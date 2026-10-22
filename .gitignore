@@ -4,3 +4,4 @@ node_modules/
 backend/data/
 *.log
 deploy/
+.env*.local

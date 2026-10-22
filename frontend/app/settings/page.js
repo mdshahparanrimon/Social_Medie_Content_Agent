@@ -7,6 +7,7 @@ import { Button, Card, ErrorText, PageHeader } from '@/components/ui';
 import { AccentPicker, ModeSwitch } from '@/components/theme';
 import { useAuth } from '@/components/auth';
 import AIUsage from '@/components/AIUsage';
+import { notify } from '@/lib/notify';
 
 const AI_PROVIDERS = [
   {
@@ -182,29 +183,24 @@ function FieldInput({ field, stored, value, onChange }) {
 function Section({ id, title, badge, description, settings, onSaved, testTarget, children }) {
   const [draft, setDraft] = useState({});
   const [busy, setBusy] = useState(null);
-  const [result, setResult] = useState(null);
   const dirty = Object.keys(draft).length > 0;
 
-  const setField = (key, value) => {
-    setResult(null);
-    setDraft((d) => ({ ...d, [key]: value }));
-  };
+  const setField = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
 
   async function run(kind) {
     setBusy(kind);
-    setResult(null);
     try {
       if (dirty) {
         onSaved(await api('/settings', { method: 'PUT', body: draft }));
         setDraft({});
       }
       if (kind === 'test') {
-        setResult(await api(`/settings/test/${testTarget}`, { method: 'POST' }));
+        notify(await api(`/settings/test/${testTarget}`, { method: 'POST' }));
       } else {
-        setResult({ ok: true, message: 'Saved' });
+        notify({ ok: true, message: `${title} settings saved` });
       }
     } catch (err) {
-      setResult({ ok: false, message: err.message });
+      notify({ ok: false, message: err.message });
     }
     setBusy(null);
   }
@@ -238,9 +234,7 @@ function Section({ id, title, badge, description, settings, onSaved, testTarget,
             {busy === 'test' ? 'Testing…' : dirty ? 'Save & test' : 'Test connection'}
           </Button>
         )}
-        {result && (
-          <span className={`text-sm ${result.ok ? 'text-emerald-700' : 'text-red-600'}`}>{result.message}</span>
-        )}
+        {dirty && <span className="text-xs font-medium text-amber-700">Unsaved changes</span>}
       </div>
     </Card>
   );
@@ -382,6 +376,22 @@ function McpConnector({ onChange }) {
               : 'No connector yet.'}
           </p>
         )
+      )}
+
+      {state?.active && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          {state.last_used_at ? (
+            <p className="text-emerald-700">
+              Connected: {state.last_client || 'Claude'} last used it {new Date(state.last_used_at).toLocaleString()}
+              {state.last_tool && ` (${state.last_tool})`}.
+            </p>
+          ) : (
+            <p className="text-amber-700">Not used yet. Ask Claude something in a chat with Content Agent turned on, then check again.</p>
+          )}
+          <Button variant="secondary" onClick={() => api('/mcp').then(setState).catch((err) => setError(err.message))} disabled={busy}>
+            Check again
+          </Button>
+        </div>
       )}
 
       <div className="flex flex-wrap gap-2">
@@ -531,6 +541,23 @@ export default function SettingsPage() {
               <div className="grid gap-3 sm:grid-cols-2">
                 {field({ key: 'google_client_id', label: 'Client ID' })}
                 {field({ key: 'google_client_secret', label: 'Client Secret', secret: true })}
+              </div>
+              <div className="space-y-2 border-t border-zinc-100 pt-3">
+                <h4 className="text-sm font-semibold text-zinc-900">Google Drive (Connections → Google Drive)</h4>
+                <p className="text-sm text-zinc-600">
+                  The same Google client lets each workspace connect its Drive, so post images, videos and PDFs can be added from private
+                  Drive links.
+                </p>
+                <ol className="list-decimal space-y-1 pl-5 text-sm text-zinc-600">
+                  <li>APIs &amp; Services → Library → Google Drive API → Enable.</li>
+                  <li>OAuth consent screen → Data access → Add scope: .../auth/drive.readonly.</li>
+                  <li>Your OAuth client → Authorized redirect URIs: also add the Drive callback URL below.</li>
+                  <li>
+                    While the app is in Testing, add each Google account under Audience → Test users. Google then makes people reconnect Drive
+                    every 7 days; publishing the app for everyone needs Google&apos;s verification of the Drive scope.
+                  </li>
+                </ol>
+                <CallbackUrl url={apps.google_drive?.callback_url} label="Drive callback URL" />
               </div>
             </div>
             <div className="space-y-3 rounded-lg border border-zinc-200 p-4">

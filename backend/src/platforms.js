@@ -18,6 +18,8 @@ export const PLATFORMS = {
     maxChars: 3000,
     image: { aspect: '1:1', width: 1200, height: 1200 },
     video: { aspect: '16:9' },
+    // PDF carousels (document posts); the caption is the post text.
+    documents: true,
     guide: [
       'Professional but human. Ideal length 600-1300 characters, never above 3000.',
       'The first 2 lines must hook the reader (they show before "see more").',

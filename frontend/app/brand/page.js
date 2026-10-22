@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { api, PLATFORMS } from '@/lib/api';
 import { Button, Card, ErrorText, PageHeader } from '@/components/ui';
 
@@ -25,7 +26,6 @@ export default function BrandPage() {
   const [brand, setBrand] = useState(null);
   const [pillarsText, setPillarsText] = useState('');
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -38,12 +38,10 @@ export default function BrandPage() {
   }, []);
 
   const set = (key) => (e) => {
-    setSaved(false);
     setBrand({ ...brand, [key]: e.target.value });
   };
 
   const togglePlatform = (key) => {
-    setSaved(false);
     const platforms = brand.platforms.includes(key)
       ? brand.platforms.filter((p) => p !== key)
       : [...brand.platforms, key];
@@ -53,15 +51,14 @@ export default function BrandPage() {
   async function save(e) {
     e.preventDefault();
     setSaving(true);
-    setError('');
     try {
       const pillars = pillarsText.split('\n').map((p) => p.trim()).filter(Boolean);
       const updated = await api('/brand', { method: 'PUT', body: { ...brand, pillars } });
       setBrand(updated);
       setPillarsText(updated.pillars.join('\n'));
-      setSaved(true);
+      toast.success('Brand Brain saved');
     } catch (err) {
-      setError(err.message);
+      toast.error(err.message);
     } finally {
       setSaving(false);
     }
@@ -120,10 +117,7 @@ export default function BrandPage() {
             className="input"
             rows={5}
             value={pillarsText}
-            onChange={(e) => {
-              setSaved(false);
-              setPillarsText(e.target.value);
-            }}
+            onChange={(e) => setPillarsText(e.target.value)}
             required
           />
         </Field>
@@ -159,7 +153,6 @@ export default function BrandPage() {
         <Button type="submit" disabled={saving}>
           {saving ? 'Saving…' : 'Save Brand Brain'}
         </Button>
-        {saved && <span className="text-sm text-emerald-700">Saved</span>}
       </div>
     </form>
   );
