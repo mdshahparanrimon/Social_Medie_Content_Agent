@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import sharp from 'sharp';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString, StandardFonts } from 'pdf-lib';
 import { httpError } from './errors.js';
 
 // LinkedIn carousels are PDFs: each slide is drawn as an image (sharp renders text with Pango, so any script,
@@ -28,13 +29,21 @@ function onColor(hex) {
 }
 
 // Text wrapped to `width`, shrunk step by step until it fits in `maxHeight`.
+// Layout problems found while drawing (text that had to shrink a lot, or still didn't fit), collected per render.
+const layoutContext = new AsyncLocalStorage();
+const noteLayout = (code, message) => layoutContext.getStore()?.warnings.push({ code, message: `Slide ${layoutContext.getStore().page}: ${message}` });
+
 async function textBlock(text, { size, color, bold = false, width = TEXT_W, maxHeight, align = 'left' }) {
   const markup = `<span foreground="${color}"${bold ? ' weight="bold"' : ''}>${escape(text)}</span>`;
   for (let pt = size; ; pt = Math.floor(pt * 0.9)) {
     const { data, info } = await sharp({ text: { text: markup, font: `${FONT} ${pt}`, width, dpi: 72, rgba: true, wrap: 'word', align, spacing: Math.round(pt * 0.25) } })
       .png()
       .toBuffer({ resolveWithObject: true });
-    if (!maxHeight || info.height <= maxHeight || pt <= 20) return { input: data, height: info.height, width: info.width };
+    if (!maxHeight || info.height <= maxHeight || pt <= 20) {
+      if (maxHeight && info.height > maxHeight) noteLayout('TEXT_OVERFLOW', 'text does not fit even at the smallest size and may run into other elements. Shorten it.');
+      else if (maxHeight && pt < size * 0.7) noteLayout('TEXT_SHRUNK', `text was shrunk to ${Math.round((pt / size) * 100)}% to fit; shorter text reads better.`);
+      return { input: data, height: info.height, width: info.width };
+    }
   }
 }
 
@@ -107,27 +116,53 @@ async function closingSlide({ slide, accent, brand, page, total }) {
 }
 
 // slides: [{ heading, body }], the first is the cover and the last the closing slide. One JPEG per slide.
+// Returns { images, layoutWarnings }.
 export async function renderSlides({ slides, accent, brand }) {
   const color = validAccent(accent);
   const total = slides.length;
-  const images = [];
-  for (const [i, slide] of slides.entries()) {
-    const args = { slide, accent: color, brand, page: i + 1, total };
-    images.push(await (i === 0 ? coverSlide(args) : i === total - 1 ? closingSlide(args) : contentSlide(args)));
-  }
-  return images;
+  const context = { warnings: [], page: 0 };
+  const images = await layoutContext.run(context, async () => {
+    const out = [];
+    for (const [i, slide] of slides.entries()) {
+      context.page = i + 1;
+      const args = { slide, accent: color, brand, page: i + 1, total };
+      out.push(await (i === 0 ? coverSlide(args) : i === total - 1 ? closingSlide(args) : contentSlide(args)));
+    }
+    return out;
+  });
+  return { images, layoutWarnings: context.warnings };
 }
 
-// The slides as the pages of one PDF. Returns the PDF bytes.
-export async function renderCarousel({ title, slides, accent, brand }) {
+// The slides as the pages of one PDF.
+// Each page is an image of the slide (so any script is drawn correctly), plus an invisible text layer with the slide's
+// words when the text can be encoded in a standard PDF font (Latin text). That layer makes the PDF searchable and
+// lets screen readers/text extraction read it. Text in other scripts (e.g. Bengali) can NOT be added without
+// embedding a font file, so those pages are reported in `unsearchablePages` and stay image-only.
+// Returns { pdf, images, layoutWarnings, searchablePages, unsearchablePages }.
+export async function renderCarousel({ title, slides, accent, brand, lang = 'en' }) {
   const pdf = await PDFDocument.create();
   pdf.setTitle(title);
+  pdf.setLanguage(lang);
+  pdf.catalog.set(PDFName.of('Lang'), PDFString.of(lang));
   if (brand) pdf.setAuthor(brand);
-  for (const jpeg of await renderSlides({ slides, accent, brand })) {
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const { images, layoutWarnings } = await renderSlides({ slides, accent, brand });
+  const searchablePages = [];
+  const unsearchablePages = [];
+  for (const [i, jpeg] of images.entries()) {
     const image = await pdf.embedJpg(jpeg);
-    pdf.addPage([W, H]).drawImage(image, { x: 0, y: 0, width: W, height: H });
+    const page = pdf.addPage([W, H]);
+    page.drawImage(image, { x: 0, y: 0, width: W, height: H });
+    const words = [slides[i].heading, slides[i].body].filter(Boolean).join('. ');
+    try {
+      font.encodeText(words); // throws for characters Helvetica can't encode
+      page.drawText(words, { x: 4, y: 4, size: 1, font, opacity: 0, maxWidth: W - 8 });
+      searchablePages.push(i + 1);
+    } catch {
+      unsearchablePages.push(i + 1);
+    }
   }
-  return Buffer.from(await pdf.save());
+  return { pdf: Buffer.from(await pdf.save()), images, layoutWarnings, searchablePages, unsearchablePages };
 }
 
 // Checks an uploaded file is a readable PDF that LinkedIn takes; returns its page count.

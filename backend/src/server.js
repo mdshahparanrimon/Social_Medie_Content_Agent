@@ -10,6 +10,7 @@ import { adminRouter } from './admin.js';
 import { mcpRouter, mcpTokenRouter } from './mcp.js';
 import { requireAdmin, requireAuth, sameOriginOnly } from './auth/session.js';
 import { startScheduler } from './scheduler.js';
+import { errorHandler } from './errorHandler.js';
 
 const PORT = Number(process.env.PORT) || 4000;
 // The browser talks to this API through the frontend (Next.js proxies /api), so by default it only listens on this computer.
@@ -36,7 +37,16 @@ app.set('trust proxy', !TRUST_PROXY ? 'loopback' : TRUST_PROXY === 'true' ? true
 app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000', credentials: true }));
 // Large enough for an 8 MB image upload sent as base64.
 app.use(express.json({ limit: '12mb' }));
-app.use('/media', express.static(UPLOAD_DIR, { maxAge: '30d' }));
+// Files have unguessable names (128-bit) under a per-workspace folder; never listed, never sniffed as HTML.
+app.use('/media', express.static(UPLOAD_DIR, {
+  maxAge: '30d',
+  index: false,
+  dotfiles: 'deny',
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  },
+}));
 // Called by Claude (claude.ai's servers), not the browser: the secret in the URL is the login.
 app.use('/mcp', mcpRouter);
 app.use('/api', sameOriginOnly);
@@ -46,13 +56,11 @@ app.use('/api/admin', requireAuth, requireAdmin, adminRouter);
 app.use('/api/mcp', requireAuth, mcpTokenRouter);
 app.use('/api', requireAuth, router);
 
-app.use((err, req, res, next) => {
-  if (!err.status || err.status >= 500) console.error(err);
-  const status = err.status || 500;
-  res.status(status).json({ error: status >= 500 && !err.status ? 'Something went wrong.' : err.message, code: err.code });
-});
+app.use(errorHandler);
 
 app.listen(PORT, HOST, () => {
   console.log(`Content agent API running on http://${HOST}:${PORT}`);
-  startScheduler();
+  // SCHEDULER=off: for trying the app against a real database without publishing posts or running cleanup jobs.
+  if (process.env.SCHEDULER === 'off') console.log('Scheduler is off (SCHEDULER=off): nothing is published and no cleanup runs.');
+  else startScheduler();
 });

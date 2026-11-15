@@ -1,348 +1,375 @@
 'use client';
 
-import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
-import { api, formatDateTime, PLATFORMS } from '@/lib/api';
-import { Button, ButtonLink, Card, PlatformBadge } from '@/components/ui';
-import { Icon } from '@/components/Nav';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { api } from '@/lib/api';
+import { notifyChats } from '@/lib/chatEvents';
 import { useAuth } from '@/components/auth';
-import AIUsage from '@/components/AIUsage';
+import { ErrorText } from '@/components/ui';
+import PostCard from '@/components/PostCard';
 
-function greeting() {
-  const h = new Date().getHours();
-  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
-}
-
-function SectionTitle({ children, action }) {
-  return (
-    <div className="mb-4 flex items-center justify-between gap-3">
-      <h2 className="font-serif text-lg font-semibold text-zinc-900">{children}</h2>
-      {action}
-    </div>
-  );
-}
-
-function MoreLink({ href, children }) {
-  return (
-    <Link href={href} className="text-sm font-medium text-accent-600 hover:underline dark:text-accent-700">
-      {children} →
-    </Link>
-  );
-}
-
-const TILE_TONES = {
-  accent: 'bg-accent-50 text-accent-700',
-  amber: 'bg-amber-50 text-amber-700',
-  emerald: 'bg-emerald-50 text-emerald-700',
-  red: 'bg-red-50 text-red-700',
-  zinc: 'bg-zinc-100 text-zinc-500',
+// What each agent tool did, in the user's words.
+const TOOL_LABELS = {
+  get_writing_guide: 'Read the Brand Brain',
+  update_brand_brain: 'Updated the Brand Brain',
+  list_calendar: 'Checked the calendar',
+  add_calendar_items: 'Added to the calendar',
+  list_posts: 'Looked at posts',
+  create_post: 'Saved a draft',
+  update_post: 'Edited a draft',
+  set_post_image: 'Attached an image',
+  set_post_video: 'Attached a video',
+  generate_post_image: 'Made an AI image',
+  generate_post_video: 'Started an AI video',
+  generate_post_carousel: 'Made a PDF carousel',
+  set_post_document: 'Attached a PDF',
+  check_post_quality: 'Checked a post',
+  set_post_image_alt: 'Set image alt text',
+  unschedule_post: 'Moved a post back to draft',
 };
 
-function StatTile({ label, value, hint, href, icon, tone }) {
+const PATHS = {
+  spark: 'M12 3l1.8 4.9L19 9.7l-4.9 1.8L12 16.4l-1.8-4.9L5.3 9.7l4.9-1.8L12 3ZM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z',
+  send: 'M5 12h14M13 6l6 6-6 6',
+  check: 'm5 12 4 4 10-10',
+  x: 'M6 6l12 12M18 6 6 18',
+  calendar: 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z',
+  pen: 'M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4',
+  chart: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
+};
+
+function Glyph({ name, className = 'size-4', strokeWidth = 1.8 }) {
   return (
-    <Link href={href} className="group">
-      <Card className="h-full transition group-hover:border-accent-300 group-hover:shadow-md">
-        <div className="flex items-start justify-between">
-          <span className={`grid size-9 place-items-center rounded-lg ${TILE_TONES[tone]}`}>
-            <Icon name={icon} />
-          </span>
-          <span className="text-xs text-zinc-400 transition group-hover:text-accent-600">View →</span>
-        </div>
-        <div className="mt-4 font-serif text-3xl font-semibold tabular-nums text-zinc-900">{value}</div>
-        <div className="mt-0.5 text-sm font-medium text-zinc-700">{label}</div>
-        <div className="text-xs text-zinc-500">{hint}</div>
-      </Card>
-    </Link>
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={PATHS[name]} />
+    </svg>
   );
 }
 
-const PIPELINE = [
-  { key: 'draft', label: 'Drafts', color: 'bg-amber-400' },
-  { key: 'scheduled', label: 'Scheduled', color: 'bg-accent-500' },
-  { key: 'published', label: 'Published', color: 'bg-emerald-500' },
-  { key: 'failed', label: 'Failed', color: 'bg-red-500' },
+const SUGGESTIONS = [
+  { icon: 'calendar', title: 'Plan my week', text: 'A week of posts for LinkedIn and X', prompt: 'Plan next week for LinkedIn and X' },
+  { icon: 'pen', title: 'Write a post', text: 'About our newest client result', prompt: 'Write a LinkedIn post about our newest client result' },
+  { icon: 'chart', title: 'Improve my drafts', text: 'Check drafts and fix what the review found', prompt: 'Look at my drafts and fix the ones that need work' },
+  { icon: 'globe', title: 'বাংলায় লেখো', text: 'Facebook-এর জন্য একটা post', prompt: 'আমার brand-এর জন্য একটা Facebook post লেখো' },
 ];
 
-function Pipeline({ values }) {
-  const total = PIPELINE.reduce((sum, s) => sum + values[s.key], 0);
+function AgentAvatar({ size = 'size-8' }) {
   return (
-    <Card>
-      <SectionTitle action={<span className="text-sm text-zinc-500">{total} posts total</span>}>Content pipeline</SectionTitle>
-      <div className="flex h-3 overflow-hidden rounded-full bg-zinc-100">
-        {total > 0 &&
-          PIPELINE.map((s) =>
-            values[s.key] ? (
-              <div key={s.key} className={`${s.color} h-full`} style={{ width: `${(values[s.key] / total) * 100}%` }} title={`${s.label}: ${values[s.key]}`} />
-            ) : null,
-          )}
-      </div>
-      <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
-        {PIPELINE.map((s) => (
-          <div key={s.key} className="flex items-center gap-2 text-sm">
-            <span className={`size-2.5 rounded-full ${s.color}`} />
-            <span className="text-zinc-600">{s.label}</span>
-            <span className="font-semibold tabular-nums text-zinc-900">{values[s.key]}</span>
-          </div>
-        ))}
-      </div>
-    </Card>
+    <span className={`grid ${size} shrink-0 place-items-center rounded-full bg-accent-600 text-white shadow-sm ring-4 ring-accent-50`}>
+      <Glyph name="spark" className="size-[55%]" />
+    </span>
   );
 }
 
-function DateBlock({ iso }) {
-  const d = new Date(iso);
+// The agent may mark words as **bold**; show them bold instead of with stars.
+function RichText({ text }) {
+  return text.split(/\*\*(.+?)\*\*/g).map((part, i) => (i % 2 ? <strong key={i} className="font-semibold text-zinc-900">{part}</strong> : part));
+}
+
+function ToolSteps({ tools }) {
+  if (!tools?.length) return null;
   return (
-    <div className="w-12 shrink-0 overflow-hidden rounded-lg border border-zinc-200 text-center">
-      <div className="bg-zinc-100 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
-        {d.toLocaleDateString(undefined, { month: 'short' })}
-      </div>
-      <div className="py-1 font-serif text-lg font-semibold leading-none text-zinc-900">{d.getDate()}</div>
-    </div>
+    <ul className="mt-2 flex flex-wrap gap-1.5">
+      {tools.map((tool, i) => {
+        const failed = tool.ok === false;
+        return (
+          <li
+            key={i}
+            title={tool.error || undefined}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${
+              failed ? 'border-red-100 bg-red-50 text-red-700' : 'border-zinc-200 bg-zinc-50 text-zinc-600'
+            }`}
+          >
+            <span className={`grid size-4 place-items-center rounded-full ${failed ? 'bg-red-100' : 'bg-emerald-100 text-emerald-700'}`}>
+              <Glyph name={failed ? 'x' : 'check'} className="size-2.5" strokeWidth={3} />
+            </span>
+            {TOOL_LABELS[tool.name] || tool.name}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
-function NextUp({ upcoming }) {
-  return (
-    <Card className="lg:col-span-2">
-      <SectionTitle action={<MoreLink href="/posts?tab=scheduled">All scheduled</MoreLink>}>Next up</SectionTitle>
-      {upcoming.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-zinc-300 py-10 text-center">
-          <p className="text-sm text-zinc-500">Nothing scheduled yet.</p>
-          <ButtonLink href="/calendar" variant="secondary" className="mt-3">
-            Plan your week
-          </ButtonLink>
-        </div>
-      ) : (
-        <ul className="-my-3 divide-y divide-zinc-200">
-          {upcoming.map((post) => (
-            <li key={post.id} className="flex items-center gap-4 py-3">
-              <DateBlock iso={post.scheduled_at} />
-              <div className="min-w-0 flex-1">
-                <div className="mb-1 flex items-center gap-2">
-                  <PlatformBadge platform={post.platform} />
-                  <span className="text-xs text-zinc-500">{formatDateTime(post.scheduled_at)}</span>
-                </div>
-                <p className="truncate text-sm text-zinc-800">{post.content}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Card>
-  );
-}
-
-function CheckItem({ ok, title, detail, href, cta }) {
-  return (
-    <li className="flex items-start gap-3">
-      <span
-        className={`mt-0.5 grid size-5 shrink-0 place-items-center rounded-full text-[11px] font-bold ${
-          ok ? 'bg-emerald-500 text-white' : 'border-2 border-zinc-300'
-        }`}
-      >
-        {ok && '✓'}
-      </span>
-      <div className="min-w-0 flex-1 text-sm">
-        <div className={ok ? 'text-zinc-500' : 'font-medium text-zinc-900'}>{title}</div>
-        {detail && <div className="text-xs text-zinc-500">{detail}</div>}
-      </div>
-      {!ok && href && (
-        <Link href={href} className="shrink-0 text-xs font-medium text-accent-600 hover:underline dark:text-accent-700">
-          {cta}
-        </Link>
-      )}
-    </li>
-  );
-}
-
-function Setup({ status, anyLive, isAdmin }) {
-  const { ai, brandMissing } = status;
-  const items = [
-    {
-      ok: ai.ready,
-      title: 'Connect an AI provider',
-      detail: ai.ready ? `${ai.label} · ${ai.model}` : 'Add your API key to start writing',
-      href: '/settings#ai',
-      cta: 'Settings',
-    },
-    {
-      ok: brandMissing.length === 0,
-      title: 'Fill in your Brand Brain',
-      detail: brandMissing.length ? `Missing: ${brandMissing.join(', ')}` : 'Voice, audience and pillars set',
-      href: '/brand',
-      cta: 'Open',
-    },
-    {
-      ok: anyLive,
-      title: 'Connect a social account',
-      detail: anyLive ? 'Posts go live on connected channels' : 'Until then, posts are simulated',
-      href: '/connections',
-      cta: 'Connect',
-    },
-  ];
-  const done = items.filter((i) => i.ok).length;
-  return (
-    <Card>
-      <SectionTitle action={<span className="text-sm tabular-nums text-zinc-500">{done}/{items.length}</span>}>Setup</SectionTitle>
-      <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-zinc-100">
-        <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${(done / items.length) * 100}%` }} />
-      </div>
-      <ul className="space-y-3.5">
-        {items.map((item) => (
-          <CheckItem key={item.title} {...item} />
-        ))}
-      </ul>
-    </Card>
-  );
-}
-
-function channelState(p) {
-  const daysLeft = p.expires_at ? Math.ceil((new Date(p.expires_at) - Date.now()) / 86_400_000) : null;
-  if (p.expired || (daysLeft !== null && daysLeft <= 0)) return { dot: 'bg-red-500', text: 'Expired, reconnect', warn: true };
-  if (p.live && daysLeft !== null && daysLeft <= 7) return { dot: 'bg-amber-500', text: `Reconnect within ${daysLeft} day${daysLeft === 1 ? '' : 's'}`, warn: true };
-  if (p.live) return { dot: 'bg-emerald-500', text: p.account ? `Connected as ${p.account}` : 'Connected' };
-  if (p.configured) return { dot: 'bg-zinc-400', text: 'Dry run: simulated' };
-  return { dot: 'bg-zinc-300', text: 'Not connected, simulated', connect: true };
-}
-
-function Channels({ platforms }) {
-  return (
-    <Card>
-      <SectionTitle action={<MoreLink href="/connections">Manage</MoreLink>}>Channels</SectionTitle>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {Object.entries(platforms).map(([key, p]) => {
-          const s = channelState(p);
-          return (
-            <div key={key} className="flex items-center gap-3 rounded-lg border border-zinc-200 px-3 py-2.5">
-              <PlatformBadge platform={key} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5 text-sm font-medium text-zinc-900">
-                  <span className={`size-2 rounded-full ${s.dot}`} />
-                  {PLATFORMS[key]?.label || key}
-                </div>
-                <div className={`truncate text-xs ${s.warn ? 'font-medium text-red-600' : 'text-zinc-500'}`}>{s.text}</div>
-              </div>
-              {(s.connect || s.warn) && (
-                <Link href="/connections" className="shrink-0 text-xs font-medium text-accent-600 hover:underline dark:text-accent-700">
-                  {s.warn ? 'Reconnect' : 'Connect'}
-                </Link>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
-function Skeleton() {
-  return (
-    <div className="animate-pulse space-y-6">
-      <div className="h-64 rounded-xl bg-zinc-200" />
-      <div className="h-16 w-72 rounded-lg bg-zinc-200" />
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="h-36 rounded-xl bg-zinc-200" />
-        ))}
-      </div>
-      <div className="h-28 rounded-xl bg-zinc-200" />
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="h-64 rounded-xl bg-zinc-200 lg:col-span-2" />
-        <div className="h-64 rounded-xl bg-zinc-200" />
-      </div>
-    </div>
-  );
-}
-
-export default function Dashboard() {
-  const { isAdmin, user } = useAuth();
-  const [status, setStatus] = useState(null);
-  const [error, setError] = useState('');
-
-  const load = useCallback(() => {
-    setError('');
-    api('/status').then(setStatus).catch((err) => setError(err.message));
-  }, []);
-
-  useEffect(load, [load]);
-
-  if (error)
+function Message({ message, posts, cardIds = [], continued = false, onUpdate, onRemove }) {
+  if (message.role === 'user') {
     return (
-      <Card className="mx-auto max-w-md py-10 text-center">
-        <p className="font-serif text-lg font-semibold text-zinc-900">Couldn&apos;t load the dashboard</p>
-        <p className="mt-1 text-sm text-red-600">{error}</p>
-        <Button className="mt-4" onClick={load}>
-          Try again
-        </Button>
-      </Card>
+      <div className="flex justify-end">
+        <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-accent-600 px-4 py-2.5 text-sm leading-relaxed text-white shadow-sm sm:max-w-[75%]">
+          {message.text}
+        </p>
+      </div>
     );
-  if (!status) return <Skeleton />;
+  }
+  const cards = cardIds.map((id) => posts[id]).filter(Boolean);
+  return (
+    // Steps of one answer sit under a single avatar.
+    <div className={`flex gap-3 ${continued ? '-mt-3' : ''}`}>
+      {continued ? <span className="w-8 shrink-0" aria-hidden /> : <AgentAvatar />}
+      <div className="min-w-0 flex-1 space-y-3 pt-1">
+        {(message.text || message.tools?.length > 0) && (
+          <div>
+            {message.text && (
+              <p className="whitespace-pre-wrap text-[15px] leading-7 text-zinc-700">
+                <RichText text={message.text} />
+              </p>
+            )}
+            <ToolSteps tools={message.tools} />
+          </div>
+        )}
+        {cards.map((post) => (
+          <PostCard key={post.id} post={post} onUpdate={onUpdate} onRemove={onRemove} />
+        ))}
+      </div>
+    </div>
+  );
+}
 
-  const { counts, platforms, usage, upcoming, ai, images } = status;
-  const values = {
-    draft: counts.draft || 0,
-    scheduled: (counts.approved || 0) + (counts.publishing || 0),
-    published: counts.published || 0,
-    failed: counts.failed || 0,
-  };
-  const anyLive = Object.values(platforms).some((p) => p.live);
-  const today = new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+function Thinking() {
+  return (
+    <div className="flex items-center gap-3" role="status">
+      <AgentAvatar />
+      <div className="flex items-center gap-3 rounded-2xl rounded-tl-md border border-zinc-200 bg-zinc-50 px-4 py-3">
+        <span className="flex gap-1" aria-hidden>
+          {[0, 150, 300].map((delay) => (
+            <span key={delay} className="size-1.5 animate-bounce rounded-full bg-accent-500" style={{ animationDelay: `${delay}ms` }} />
+          ))}
+        </span>
+        <span className="text-sm text-zinc-500">Working on it, this can take up to a minute</span>
+      </div>
+    </div>
+  );
+}
+
+function greeting() {
+  const hour = new Date().getHours();
+  return hour < 5 ? 'Working late' : hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+}
+
+function Welcome({ onPick, composer }) {
+  const { user } = useAuth();
+  const first = user?.name?.trim().split(/\s+/).at(-1);
+  return (
+    <div className="mx-auto flex max-w-2xl flex-col items-center px-2 text-center">
+      <h2 className="flex flex-col items-center gap-3 font-serif text-3xl font-semibold tracking-tight text-zinc-900 sm:flex-row sm:text-4xl">
+        <AgentAvatar size="size-10" />
+        {greeting()}{first ? `, ${first}` : ''}
+      </h2>
+      <p className="mt-3 max-w-md text-sm leading-6 text-zinc-500">
+        Ask in English or বাংলা. The agent plans, writes and fixes posts with your Brand Brain. Nothing goes live until you approve it.
+      </p>
+      <div className="mt-6 w-full text-left">{composer}</div>
+      <div className="mt-4 grid w-full grid-cols-2 gap-2 sm:gap-3">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s.title}
+            type="button"
+            onClick={() => onPick(s.prompt)}
+            className="group flex items-start gap-3 rounded-xl border border-zinc-200 bg-surface p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-accent-300 hover:shadow-md sm:p-4"
+          >
+            <span className="hidden size-9 shrink-0 place-items-center rounded-lg bg-accent-50 text-accent-700 transition group-hover:bg-accent-100 sm:grid">
+              <Glyph name={s.icon} className="size-[18px]" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-zinc-900">{s.title}</span>
+              <span className="mt-0.5 block text-xs leading-5 text-zinc-500">{s.text}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ChatView() {
+  const router = useRouter();
+  const requested = useSearchParams().get('c'); // the conversation in the URL, none = new chat
+  const [current, setCurrent] = useState(null);
+  const [title, setTitle] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [posts, setPosts] = useState({});
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const bottom = useRef(null);
+  const inputRef = useRef(null);
+  const currentRef = useRef(null);
+  currentRef.current = current;
+
+  const addPosts = (list) => setPosts((map) => ({ ...map, ...Object.fromEntries(list.map((p) => [p.id, p])) }));
+  const update = useCallback((post) => setPosts((map) => ({ ...map, [post.id]: post })), []);
+  const remove = useCallback((id) => setPosts((map) => {
+    const { [id]: _, ...rest } = map;
+    return rest;
+  }), []);
+
+  // Follow the URL: open the conversation it names, or start fresh. A chat this page just created is already shown.
+  useEffect(() => {
+    if (requested && requested === currentRef.current) return;
+    setError('');
+    setPosts({});
+    setInput('');
+    if (!requested) {
+      setCurrent(null);
+      setTitle('');
+      setMessages([]);
+      notifyChats(null);
+      inputRef.current?.focus();
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setMessages([]);
+    api(`/chat/conversations/${requested}`)
+      .then((view) => {
+        if (cancelled) return;
+        setCurrent(view.id);
+        setTitle(view.title);
+        setMessages(view.messages);
+        addPosts(view.posts);
+        notifyChats(view.id);
+      })
+      .catch((err) => !cancelled && setError(err.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [requested]);
+
+  useEffect(() => {
+    if (messages.length || busy) bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, busy]);
+
+  // The message box grows with its text, up to a limit.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [input]);
+
+  async function send(text) {
+    const message = text.trim();
+    if (!message || busy) return;
+    setBusy(true);
+    setError('');
+    setInput('');
+    setMessages((list) => [...list, { role: 'user', text: message }]);
+    try {
+      const result = await api('/chat', { method: 'POST', body: { conversation_id: current, message } });
+      addPosts(result.posts);
+      // The reply starts with the user's message, already shown.
+      setMessages((list) => [...list, ...result.messages.slice(1)]);
+      if (!current) {
+        setCurrent(result.conversation_id);
+        currentRef.current = result.conversation_id;
+        setTitle(result.title);
+        router.replace(`/?c=${result.conversation_id}`, { scroll: false });
+      }
+      notifyChats(result.conversation_id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  // Each post card is shown once, under the last message that touched it (a draft is often saved, then fixed).
+  const cardsAt = new Map();
+  const lastTouch = new Map();
+  messages.forEach((m, i) => (m.post_ids || []).forEach((id) => lastTouch.set(id, i)));
+  for (const [id, i] of lastTouch) cardsAt.set(i, [...(cardsAt.get(i) || []), id]);
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      send(input);
+    }
+  }
+
+  const empty = !loading && messages.length === 0;
+
+  const composer = (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        send(input);
+      }}
+      className="mx-auto flex max-w-3xl items-end gap-2 rounded-3xl border border-zinc-300 bg-surface p-2 pl-5 shadow-[0_2px_12px_rgba(0,0,0,0.06)] transition focus-within:border-accent-500 focus-within:ring-4 focus-within:ring-accent-100"
+    >
+      <label htmlFor="chat-input" className="sr-only">Message</label>
+      <textarea
+        id="chat-input"
+        ref={inputRef}
+        className="max-h-[200px] min-h-[40px] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 text-zinc-900 placeholder:text-zinc-400 focus:outline-none"
+        rows={1}
+        maxLength={4000}
+        placeholder={current ? 'Reply to the agent…' : 'How can I help with your content today?'}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={onKeyDown}
+        disabled={busy}
+        autoFocus
+      />
+      <button
+        type="submit"
+        disabled={busy || !input.trim()}
+        className="grid size-10 shrink-0 place-items-center rounded-full bg-accent-600 text-white shadow-sm transition hover:bg-accent-700 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400 disabled:shadow-none dark:hover:brightness-110"
+        aria-label="Send"
+      >
+        <Glyph name="send" className="size-[18px]" strokeWidth={2.2} />
+      </button>
+    </form>
+  );
 
   return (
-    <div className="space-y-6">
-      <AIUsage ai={ai} images={images} videos={status.videos} usage={usage} manageHref="/settings#ai" />
-
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-sm text-zinc-500">{today}</p>
-          <h1 className="font-serif text-[28px] font-semibold tracking-tight text-zinc-900">
-            {greeting()}
-            {user?.name ? `, ${user.name.split(" ")[0]}` : ""}
-          </h1>
-          <p className="mt-1 text-sm text-zinc-500">Plan → draft → approve → publish. Nothing posts without your approval.</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <ButtonLink href="/calendar" variant="secondary">
-            <Icon name="calendar" className="size-4" /> Plan this week
-          </ButtonLink>
-          <ButtonLink href="/instant">
-            <Icon name="instant" className="size-4" /> Instant post
-          </ButtonLink>
-        </div>
-      </div>
-
-      {status.dryRun && (
-        <div className="flex items-center gap-3 rounded-lg border border-amber-300/60 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
-          <span className="font-semibold">Dry run is on.</span>
-          <span>Publishing is simulated, nothing goes live.</span>
-          <Link href="/settings" className="ml-auto font-medium underline">
-            Change
-          </Link>
-        </div>
+    <div className="flex h-full min-h-0 flex-col bg-surface">
+      {!empty && (
+        <header className="flex h-12 shrink-0 items-center justify-center border-b border-zinc-200 px-4">
+          <h1 className="truncate text-sm font-medium text-zinc-800">{title || 'New chat'}</h1>
+        </header>
       )}
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatTile label="Drafts to review" hint="Waiting for your approval" value={values.draft} href="/posts" icon="posts" tone="amber" />
-        <StatTile label="Scheduled" hint="Approved and queued" value={values.scheduled} href="/posts?tab=scheduled" icon="calendar" tone="accent" />
-        <StatTile label="Published" hint="Live on your channels" value={values.published} href="/posts?tab=published" icon="dashboard" tone="emerald" />
-        <StatTile
-          label="Failed"
-          hint={values.failed ? 'Needs your attention' : 'All good'}
-          value={values.failed}
-          href="/posts?tab=failed"
-          icon="alert"
-          tone={values.failed ? 'red' : 'zinc'}
-        />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className={`mx-auto max-w-3xl space-y-6 px-4 sm:px-6 ${empty ? 'flex min-h-full flex-col justify-center py-8' : 'py-8'}`}>
+          {loading && <p className="text-center text-sm text-zinc-500">Loading…</p>}
+          {empty && <Welcome onPick={send} composer={composer} />}
+          {messages.map((m, i) => (
+            <Message
+              key={i}
+              message={m}
+              posts={posts}
+              cardIds={cardsAt.get(i)}
+              continued={m.role === 'assistant' && messages[i - 1]?.role === 'assistant'}
+              onUpdate={update}
+              onRemove={remove}
+            />
+          ))}
+          {busy && <Thinking />}
+          {error && <ErrorText error={error} />}
+          <div ref={bottom} />
+        </div>
       </div>
 
-      <Pipeline values={values} />
-
-      <div className="grid gap-4 lg:grid-cols-3">
-        <NextUp upcoming={upcoming} />
-        <Setup status={status} anyLive={anyLive} isAdmin={isAdmin} />
-      </div>
-
-      <Channels platforms={platforms} />
+      {!empty && (
+        <div className="shrink-0 px-3 pb-3 sm:px-6 sm:pb-4">
+          {composer}
+          <p className="mx-auto mt-2 hidden max-w-3xl text-center text-[11px] text-zinc-400 sm:block">
+            The agent saves drafts only. Nothing is published until you approve it.
+          </p>
+        </div>
+      )}
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={null}>
+      <ChatView />
+    </Suspense>
   );
 }

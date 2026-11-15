@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { api, charCount, formatDateTime, PLATFORMS, toLocalInput } from '@/lib/api';
 import { Button, Card, ErrorText, Icon, PlatformIcon, StatusBadge } from '@/components/ui';
+import { QualityPanel, UncertainPanel } from '@/components/QualityPanel';
 
 // Any image -> a JPEG that Instagram accepts: aspect ratio between 4:5 and 1.91:1 (center-cropped), at most 1440px wide.
 async function toPostJpeg(file) {
@@ -44,6 +45,7 @@ const TOASTS = {
   save: ['Saving…', 'Edits saved'],
   approve: ['Scheduling…', (p) => `Scheduled for ${formatDateTime(p.scheduled_at)}`],
   unapprove: ['Moving back to draft…', 'Moved back to draft'],
+  'image-alt': ['Saving alt text…', 'Alt text saved'],
   rewrite: ['Rewriting with AI…', 'New version written'],
   publish: ['Publishing…', 'Published'],
   delete: ['Deleting…', 'Post deleted'],
@@ -239,7 +241,26 @@ function ImagePanel({ post, editable, busy, run }) {
           upload it again.
         </Notice>
       )}
+      {post.media_qc?.image?.report?.warnings?.some((w) => w.code === 'IMAGE_CROPPED') && (
+        <Notice tone="amber">This image was cropped automatically to fit {PLATFORMS[post.platform].label}. Check that nothing important was cut off.</Notice>
+      )}
       {post.image_prompt && <AiDetails title="Image prompt (made with AI)">{post.image_prompt}</AiDetails>}
+      <label className="block text-sm">
+        <span className="font-medium text-zinc-700">Alt text</span>
+        <span className="ml-2 text-xs text-zinc-500">what the image shows, for screen readers</span>
+        <input
+          key={post.image_alt || 'none'}
+          className="input mt-1"
+          defaultValue={post.image_alt || ''}
+          maxLength={1000}
+          disabled={!editable || busy !== null}
+          placeholder="e.g. A founder sketching three logo ideas on paper"
+          onBlur={(e) => {
+            const alt = e.target.value.trim();
+            if (alt !== (post.image_alt || '')) run('image-alt', () => api(`/posts/${post.id}/image/alt`, { method: 'PUT', body: { alt } }));
+          }}
+        />
+      </label>
       {editable && (
         <div className="flex flex-wrap items-center gap-2">
           {ai('New AI image')}
@@ -588,13 +609,22 @@ export default function PostCard({ post, onUpdate, onRemove, defaultOpen = false
 
   const save = () => run('save', () => api(`/posts/${post.id}`, { method: 'PATCH', body: { content } }));
 
+  // The server refuses posts with items that need a person (REVIEW_REQUIRED); you can approve them after reading what it found.
   const approve = () =>
-    run('approve', () =>
-      api(`/posts/${post.id}/approve`, {
-        method: 'POST',
-        body: { content, scheduledAt: when ? new Date(when).toISOString() : undefined },
-      }),
-    );
+    run('approve', async () => {
+      const send = (acknowledge) =>
+        api(`/posts/${post.id}/approve`, {
+          method: 'POST',
+          body: { content, scheduledAt: when ? new Date(when).toISOString() : undefined, acknowledge },
+        });
+      try {
+        return await send(false);
+      } catch (err) {
+        if (err.code === 'REVIEW_REQUIRED' && window.confirm(`${err.message}\n\nApprove anyway?`)) return send(true);
+        if (err.code === 'REVIEW_REQUIRED' || err.code === 'QUALITY_BLOCKED') api(`/posts/${post.id}`).then(onUpdate).catch(() => {});
+        throw err;
+      }
+    });
 
   const unapprove = () => run('unapprove', () => api(`/posts/${post.id}/unapprove`, { method: 'POST' }));
 
@@ -720,6 +750,9 @@ export default function PostCard({ post, onUpdate, onRemove, defaultOpen = false
               </div>
             )}
           </section>
+
+          <UncertainPanel post={post} onUpdate={onUpdate} />
+          <QualityPanel post={post} onUpdate={onUpdate} />
 
           <MediaTabs post={post} editable={editable} busy={busy} run={run} />
 

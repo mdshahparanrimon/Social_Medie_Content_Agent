@@ -6,6 +6,8 @@ import { FRONTEND_URL } from '../urls.js';
 
 export const SESSION_COOKIE = 'ca_session';
 const SESSION_DAYS = 30;
+// Even an active session ends this long after sign-in, so a stolen cookie can't be kept alive forever.
+const SESSION_MAX_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Only sent over HTTPS once the app runs on a real domain.
 const SECURE = FRONTEND_URL.startsWith('https://');
@@ -54,13 +56,20 @@ export async function endSession(req, res) {
   clearCookie(res, SESSION_COOKIE);
 }
 
-// The signed-in user for this request, or null. Active sessions are extended (sliding 30 days), at most once a day.
+// The signed-in user for this request, or null. Active sessions are extended (sliding 30 days), at most once a day,
+// but never past 90 days after sign-in.
 export async function currentSession(req, res) {
   const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
   if (!token) return null;
   const id = sha256(token);
   const session = await repo.getSession(id);
   if (!session) {
+    clearCookie(res, SESSION_COOKIE);
+    return null;
+  }
+  const maxEnd = new Date(session.created_at).getTime() + SESSION_MAX_DAYS * DAY_MS;
+  if (Date.now() >= maxEnd) {
+    await repo.deleteSession(id);
     clearCookie(res, SESSION_COOKIE);
     return null;
   }
@@ -71,8 +80,9 @@ export async function currentSession(req, res) {
     return null;
   }
   if (Date.now() - new Date(session.last_seen_at).getTime() > DAY_MS) {
-    await repo.updateSession(id, { last_seen_at: new Date(), expires_at: new Date(Date.now() + SESSION_DAYS * DAY_MS) });
-    setCookie(res, SESSION_COOKIE, token, SESSION_DAYS * DAY_MS);
+    const expires = Math.min(Date.now() + SESSION_DAYS * DAY_MS, maxEnd);
+    await repo.updateSession(id, { last_seen_at: new Date(), expires_at: new Date(expires) });
+    setCookie(res, SESSION_COOKIE, token, expires - Date.now());
   }
   return { id, user };
 }

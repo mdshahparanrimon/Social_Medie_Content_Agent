@@ -8,16 +8,23 @@ import { createPostImage, startPostVideo } from './agents/artist.js';
 import { createPostCarousel } from './agents/carousel.js';
 import { publishPost } from './scheduler.js';
 import { getConfig, getPublicSettings, saveSettings } from './settings.js';
-import { EDITABLE, approvePost, editPost, setPostDocument, setPostImage, setPostVideo, unapprovePost } from './posts.js';
+import { EDITABLE, approvePost, deletePostAndMedia, editPost, removePostMedia, setImageAlt, setPostDocument, setPostImage, setPostVideo, unapprovePost } from './posts.js';
 import { platformStatus, testAccount } from './publishers/index.js';
 import { listAccounts } from './accounts.js';
-import { MAX_DOCUMENT_BYTES, MAX_VIDEO_BYTES, importDocument, importImage, importVideo, storeDocument, storeImage, storeVideo } from './media.js';
-import { pdfPageCount } from './slides.js';
+import { MAX_DOCUMENT_BYTES, MAX_VIDEO_BYTES, checkAndStoreUploadedDocument, checkAndStoreUploadedVideo, importDocument, importImage, importVideo, storageStatus, storeImage } from './media.js';
+import { assessPost, summarize } from './quality/gate.js';
+import { reviewerSetup } from './quality/review.js';
+import { reconcilePost, resolveUncertain } from './publishing.js';
+import { metrics } from './log.js';
+import { AppError } from './errors.js';
 import { DRIVE, testDrive } from './drive.js';
 import { aiStatus, generateJSON } from './llm/index.js';
 import { imageStatus } from './llm/image.js';
 import { videoStatus } from './llm/video.js';
 import { PLATFORMS } from './platforms.js';
+import { conversationView, deleteConversation, listConversations, sendMessage } from './agent/chat.js';
+import { rateLimit } from './auth/rateLimit.js';
+import { workspaceId } from './context.js';
 
 // Every route here runs behind requireAuth, inside the signed-in user's workspace.
 export const router = Router();
@@ -53,8 +60,21 @@ router.delete('/calendar/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- Chat agent ----
+router.get('/chat/conversations', async (req, res) => res.json(await listConversations()));
+router.get('/chat/conversations/:id', async (req, res) => res.json(await conversationView(req.params.id)));
+router.delete('/chat/conversations/:id', async (req, res) => {
+  await deleteConversation(req.params.id);
+  res.json({ ok: true });
+});
+// One message runs up to a few AI calls and tools, so it is limited per workspace.
+router.post('/chat', async (req, res) => {
+  rateLimit(`chat:${workspaceId()}`, 20, 60_000);
+  res.json(await sendMessage({ conversationId: req.body.conversation_id, message: req.body.message }));
+});
+
 // ---- Posts (Creator + approval) ----
-const ALL_STATUSES = ['draft', 'approved', 'publishing', 'published', 'failed'];
+const ALL_STATUSES = ['draft', 'approved', 'publishing', 'published', 'failed', 'uncertain'];
 
 router.get('/posts', async (req, res) => {
   const statuses = req.query.status ? String(req.query.status).split(',') : ALL_STATUSES;
@@ -77,7 +97,8 @@ router.post('/posts/instant', async (req, res) => {
 router.patch('/posts/:id', async (req, res) => res.json(await editPost(req.params.id, req.body.content)));
 
 router.post('/posts/:id/approve', async (req, res) => {
-  res.json(await approvePost(req.params.id, { content: req.body.content, scheduledAt: req.body.scheduledAt }));
+  // acknowledge: the person confirms the items the quality check flagged for review (blocking problems can't be confirmed away).
+  res.json(await approvePost(req.params.id, { content: req.body.content, scheduledAt: req.body.scheduledAt, acknowledge: req.body.acknowledge === true }));
 });
 
 router.post('/posts/:id/unapprove', async (req, res) => res.json(await unapprovePost(req.params.id)));
@@ -88,29 +109,30 @@ router.put('/posts/:id/image', async (req, res) => {
   // Check the post first, so an image isn't uploaded for a post that can't take it.
   const post = await getPost(req.params.id);
   if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
-  let imageUrl;
+  const alt = req.body.alt === undefined ? undefined : String(req.body.alt);
   if (req.body.dataUrl) {
-    imageUrl = await storeImage(req.body.dataUrl);
+    res.json(await setPostImage(req.params.id, await storeImage(req.body.dataUrl), { alt }));
   } else if (req.body.url) {
-    imageUrl = await importImage(String(req.body.url).trim());
+    const img = await importImage(String(req.body.url).trim(), { platform: post.platform, altText: alt });
+    res.json(await setPostImage(req.params.id, img.url, { alt, qc: img.qc }));
   } else {
     throw httpError(400, 'Upload an image or paste an image link starting with https://');
   }
-  res.json(await setPostImage(req.params.id, imageUrl));
 });
+
+// Alt text for the post image (what it shows, for screen readers).
+router.put('/posts/:id/image/alt', async (req, res) => res.json(await setImageAlt(req.params.id, req.body.alt)));
 
 // Make an image with AI from the post (and optional instructions) and attach it.
 router.post('/posts/:id/image/generate', async (req, res) => {
-  res.json(await createPostImage(req.params.id, { instructions: req.body.instructions }));
+  res.json(await createPostImage(req.params.id, { instructions: req.body.instructions, style: req.body.style, overlayText: req.body.overlayText }));
 });
 
 router.delete('/posts/:id/image', async (req, res) => {
   const post = await getPost(req.params.id);
   // An approved Instagram post without an image couldn't be published, so only drafts can lose theirs.
   const editable = PLATFORMS[post.platform].needsImage ? ['draft', 'failed'] : ['draft', 'approved', 'failed'];
-  const updated = await repo.updatePost(post.id, { image_url: null, image_prompt: null }, { onlyIfStatus: editable });
-  if (!updated) throw httpError(409, 'Move the post back to draft before removing its image.');
-  res.json(updated);
+  res.json(await removePostMedia(post, 'image', editable));
 });
 
 // One post, e.g. to follow a video that's being made (video_status).
@@ -127,17 +149,16 @@ router.put('/posts/:id/video', express.raw({ type: ['video/mp4', 'video/quicktim
   const post = await getPost(req.params.id);
   if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
   if (post.video_status === 'generating') throw httpError(409, 'A video is being made for this post. Wait until it is finished.');
-  let videoUrl;
+  let video;
   if (Buffer.isBuffer(req.body) && req.body.length) {
-    // MP4 and MOV both start with an "ftyp" box.
-    if (req.body.subarray(4, 8).toString('latin1') !== 'ftyp') throw httpError(400, 'That file is not an MP4 or MOV video.');
-    videoUrl = await storeVideo(req.body);
+    // Checked by its real contents (MP4/MOV header), not by the Content-Type the client sent.
+    video = await checkAndStoreUploadedVideo(req.body, { platform: post.platform });
   } else if (req.body?.url) {
-    videoUrl = await importVideo(String(req.body.url).trim());
+    video = await importVideo(String(req.body.url).trim(), { platform: post.platform });
   } else {
     throw httpError(400, 'Upload an MP4 or MOV video or paste a video link starting with https://');
   }
-  res.json(await setPostVideo(post.id, videoUrl));
+  res.json(await setPostVideo(post.id, video.url, { qc: video.qc }));
 });
 
 router.delete('/posts/:id/video', async (req, res) => {
@@ -145,13 +166,7 @@ router.delete('/posts/:id/video', async (req, res) => {
   if (post.video_status === 'generating') throw httpError(409, 'Wait until the video is finished, then remove it.');
   // Instagram needs an image or a video, so an approved one can't drop its only media.
   const editable = PLATFORMS[post.platform].needsImage && !post.image_url ? ['draft', 'failed'] : EDITABLE;
-  const updated = await repo.updatePost(
-    post.id,
-    { video_url: null, video_prompt: null, video_status: null, video_error: null },
-    { onlyIfStatus: editable },
-  );
-  if (!updated) throw httpError(409, 'Move the post back to draft before removing its video.');
-  res.json(updated);
+  res.json(await removePostMedia(post, 'video', editable));
 });
 
 // ---- PDF carousel (LinkedIn document posts) ----
@@ -164,17 +179,16 @@ router.put('/posts/:id/document', express.raw({ type: 'application/pdf', limit: 
   let doc;
   let title;
   if (Buffer.isBuffer(req.body) && req.body.length) {
-    const pages = await pdfPageCount(req.body);
-    doc = { url: await storeDocument(req.body), pages };
+    doc = await checkAndStoreUploadedDocument(req.body, { platform: post.platform });
     title = req.query.title;
   } else if (req.body?.url) {
-    doc = await importDocument(String(req.body.url).trim());
+    doc = await importDocument(String(req.body.url).trim(), { platform: post.platform });
     title = req.body.title || doc.filename;
   } else {
     throw httpError(400, 'Upload a PDF file or paste a PDF link starting with https://');
   }
   title = String(title || '').trim().slice(0, 100) || 'Carousel';
-  res.json(await setPostDocument(post.id, { url: doc.url, title, pages: doc.pages }));
+  res.json(await setPostDocument(post.id, { url: doc.url, title, pages: doc.pages, qc: doc.qc }));
 });
 
 // Write the slides with AI from the post (and optional instructions), draw them and attach the PDF.
@@ -184,13 +198,8 @@ router.post('/posts/:id/document/generate', async (req, res) => {
 
 router.delete('/posts/:id/document', async (req, res) => {
   const post = await getPost(req.params.id);
-  const updated = await repo.updatePost(
-    post.id,
-    { document_url: null, document_title: null, document_pages: null, document_slides: null, document_accent: null },
-    { onlyIfStatus: EDITABLE },
-  );
-  if (!updated) throw httpError(409, `A ${post.status} post cannot be changed.`);
-  res.json(updated);
+  if (!EDITABLE.includes(post.status)) throw httpError(409, `A ${post.status} post cannot be changed.`);
+  res.json(await removePostMedia(post, 'document', EDITABLE));
 });
 
 router.post('/posts/:id/rewrite', async (req, res) => {
@@ -203,10 +212,37 @@ router.post('/posts/:id/publish', async (req, res) => {
 
 router.delete('/posts/:id', async (req, res) => {
   const post = await getPost(req.params.id);
-  if (['publishing', 'published'].includes(post.status)) throw httpError(409, `A ${post.status} post cannot be deleted.`);
-  await repo.deletePost(post.id);
+  if (['publishing', 'published', 'uncertain'].includes(post.status)) throw httpError(409, `A ${post.status} post cannot be deleted.`);
+  await deletePostAndMedia(post);
   res.json({ ok: true });
 });
+
+// ---- Quality, publish attempts, uncertain outcomes ----
+// Re-run the checks. { aiReview: true } also runs the independent AI review.
+router.post('/posts/:id/quality/check', async (req, res) => {
+  const { post } = await assessPost(req.params.id, { runAi: req.body.aiReview ? 'always' : 'never', useMediaCache: false });
+  res.json({ post, quality: summarize(post.quality) });
+});
+
+router.get('/posts/:id/attempts', async (req, res) => {
+  const post = await getPost(req.params.id);
+  res.json(await repo.listAttempts(post.id));
+});
+
+// A post whose publishing result is unknown: ask the platform again, or record what the person found.
+router.post('/posts/:id/reconcile', async (req, res) => {
+  const post = await getPost(req.params.id);
+  if (post.status !== 'uncertain') throw new AppError('INVALID_TRANSITION', 'Only posts with an unknown result can be checked.', { status: 409 });
+  res.json(await reconcilePost(post.id));
+});
+
+router.post('/posts/:id/resolve', async (req, res) => {
+  res.json(await resolveUncertain(req.params.id, { outcome: req.body.outcome, externalUrl: req.body.externalUrl ? String(req.body.externalUrl).slice(0, 500) : null, actor: req.user.id }));
+});
+
+// ---- Operations: counters since the server started, recent audit events ----
+router.get('/ops/metrics', async (req, res) => res.json({ since_start: metrics(), storage: storageStatus(await getConfig()) }));
+router.get('/ops/audit', async (req, res) => res.json(await repo.listAudit(Math.min(Number(req.query.limit) || 100, 500))));
 
 // ---- Settings ----
 // The owner sees and changes app-wide settings too; everyone else only their workspace's own.
@@ -268,6 +304,8 @@ router.get('/status', async (req, res) => {
     videos: videoStatus(config),
     brandMissing: missingBrandFields(brand),
     dryRun: config.dry_run,
+    storage: storageStatus(config),
+    reviewer: (({ usable, key, model, independent, reason }) => ({ usable, provider: key, model, independent, reason }))(reviewerSetup(config)),
     platforms: platformStatus(config, accounts),
     counts,
     usage,

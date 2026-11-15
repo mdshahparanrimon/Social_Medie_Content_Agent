@@ -153,9 +153,10 @@ const STATUS_STYLES = {
   publishing: 'bg-accent-100 text-accent-800',
   published: 'bg-emerald-100 text-emerald-800',
   failed: 'bg-red-100 text-red-800',
+  uncertain: 'bg-orange-100 text-orange-800',
 };
 
-const STATUS_LABELS = { approved: 'scheduled' };
+const STATUS_LABELS = { approved: 'scheduled', uncertain: 'check needed' };
 
 export function StatusBadge({ status, simulated }) {
   return (

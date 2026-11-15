@@ -3,6 +3,9 @@ import { getBrand, brandContext, missingBrandFields } from '../brandBrain.js';
 import { generateJSON } from '../llm/index.js';
 import { renderCarousel, validAccent } from '../slides.js';
 import { storeDocument } from '../media.js';
+import { checkPdf, checkRenderedSlides, checkSlides, plain } from '../mediaQc.js';
+import { loadRules } from '../mediaRules.js';
+import { AppError } from '../errors.js';
 import { EDITABLE, setPostDocument } from '../posts.js';
 import { getPost } from './creator.js';
 import { PLATFORMS } from '../platforms.js';
@@ -64,7 +67,15 @@ ${post.content}
   return generateJSON({ task: 'carousel', system, prompt, schema: CAROUSEL_SCHEMA });
 }
 
+// Slides checked against the text rules; throws with an actionable message when a hard rule is broken.
+function validateSlides(slides, { strictCta = false } = {}) {
+  const report = checkSlides(slides, { strictCta });
+  if (!report.ok) throw new AppError('SLIDES_INVALID', `The slides need changes: ${report.errors.map((e) => e.message).join(' ')}`, { details: { errors: report.errors, warnings: report.warnings } });
+  return report;
+}
+
 // Makes a carousel PDF and attaches it to the post. `slides` (from Claude via MCP) skips the writing step.
+// The PDF is only attached after its rendered pages pass the checks; otherwise nothing is stored.
 export async function createPostCarousel(id, { instructions, title, slides, accent } = {}) {
   const post = await getPost(id);
   if (!PLATFORMS[post.platform].documents) throw httpError(400, `${PLATFORMS[post.platform].label} posts can't carry a PDF carousel.`);
@@ -72,16 +83,45 @@ export async function createPostCarousel(id, { instructions, title, slides, acce
   const brand = await getBrand();
 
   let plan = { title, slides, accent_color: accent };
+  let clean;
+  let textReport;
   if (!slides) {
     const missing = missingBrandFields(brand);
     if (missing.length) throw httpError(400, `Fill in your Brand Brain first: ${missing.join(', ')}.`);
+    // One revision if the model overshoots a text limit: tell it exactly which slide and by how much.
     plan = await writeSlides({ brand, post, instructions: instructions?.trim() });
+    clean = cleanSlides(plan.slides);
+    let check = checkSlides(clean);
+    if (!check.ok) {
+      plan = await writeSlides({ brand, post, instructions: `${instructions || ''}
+Fix these problems in your previous slides: ${check.errors.map((e) => e.message).join(' ')}`.trim() });
+      clean = cleanSlides(plan.slides);
+      check = checkSlides(clean);
+    }
+    textReport = validateSlides(clean);
+  } else {
+    clean = cleanSlides(plan.slides);
+    textReport = validateSlides(clean);
   }
-  const clean = cleanSlides(plan.slides);
   const docTitle = String(plan.title || clean[0].heading).trim().slice(0, 100);
   const color = validAccent(plan.accent_color);
 
-  const pdf = await renderCarousel({ title: docTitle, slides: clean, accent: color, brand: brand.name });
-  const url = await storeDocument(pdf);
-  return setPostDocument(post.id, { url, title: docTitle, pages: clean.length, slides: clean, accent: color });
+  const rendered = await renderCarousel({ title: docTitle, slides: clean, accent: color, brand: brand.name, lang: /bengali|bangla/i.test(brand.language) ? 'bn' : 'en' });
+  const sourceText = clean.map((s) => `${s.heading} ${s.body}`).join(' ');
+  const slideReport = await checkRenderedSlides(rendered.images, { layoutWarnings: rendered.layoutWarnings, sourceText });
+  const pdfReport = await checkPdf(rendered.pdf, { platform: post.platform });
+  if (!slideReport.ok || !pdfReport.ok) {
+    const errors = [...slideReport.errors, ...pdfReport.errors];
+    throw new AppError('CAROUSEL_RENDER_FAILED', `The carousel was not attached because it did not render correctly: ${errors.map((e) => e.message).join(' ')}`, { details: { errors } });
+  }
+  const qc = plain(pdfReport);
+  qc.warnings.push(...textReport.warnings, ...slideReport.warnings);
+  qc.humanReview.push(...slideReport.humanReview);
+  qc.info = { ...qc.info, searchablePages: rendered.searchablePages, imageOnlyPages: rendered.unsearchablePages, fonts: slideReport.info.fonts };
+  qc.checks = { ...qc.checks, ...slideReport.checks, text_limits: textReport.checks.text_limits };
+  if (rendered.unsearchablePages.length) {
+    qc.warnings.push({ code: 'PDF_IMAGE_ONLY', message: `Slide${rendered.unsearchablePages.length > 1 ? 's' : ''} ${rendered.unsearchablePages.join(', ')} contain text that can't be added as searchable text (non-Latin script), so screen readers can't read ${rendered.unsearchablePages.length > 1 ? 'them' : 'it'}. Put the key points in the post caption too.` });
+  }
+  const url = await storeDocument(rendered.pdf);
+  return setPostDocument(post.id, { url, title: docTitle, pages: clean.length, slides: clean, accent: color, qc });
 }

@@ -33,6 +33,14 @@ export const FIELDS = {
   mcp_last_client: { workspace: true, internal: true },
   mcp_last_tool: { workspace: true, internal: true },
 
+  // Content quality gate (see quality/). The reviewer can be a different provider/model from the writer ('' = same as above).
+  review_provider: { default: '', options: ['', 'gemini', 'openai_compat', 'anthropic'], workspace: true },
+  review_model: { default: '', workspace: true },
+  quality_min_score: { type: 'number', min: 0, max: 100, default: 85, workspace: true },
+  quality_max_revisions: { type: 'number', min: 0, max: 5, default: 2, workspace: true },
+  // When on, a post can only be approved after an AI review passed (or a person explicitly accepts the issues).
+  quality_require_ai_review: { type: 'boolean', default: false, workspace: true },
+
   dry_run: { type: 'boolean', default: false, workspace: true },
   post_time_x: { type: 'time', default: '10:00', workspace: true },
   post_time_linkedin: { type: 'time', default: '09:00', workspace: true },
@@ -99,6 +107,11 @@ function defaultValue(field) {
   return field.default ?? (field.type === 'boolean' ? false : '');
 }
 
+const parseNumber = (field, value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(Math.max(n, field.min ?? -Infinity), field.max ?? Infinity) : field.default;
+};
+
 // Full config for server-side use, with secrets decrypted: app-wide values plus the current workspace's own.
 export async function getConfig() {
   const global = await stored();
@@ -107,6 +120,7 @@ export async function getConfig() {
     Object.entries(FIELDS).map(([key, field]) => {
       const value = field.workspace ? own[key] : global[key];
       if (value == null || value === '') return [key, defaultValue(field)];
+      if (field.type === 'number') return [key, parseNumber(field, value)];
       return [key, field.secret ? (decrypt(value) ?? '') : value];
     }),
   );
@@ -137,6 +151,10 @@ export async function saveSettings(input, { admin = false } = {}) {
       else if (typeof value === 'string' && value.trim()) updates[key] = encrypt(value.trim());
     } else if (field.type === 'boolean') {
       updates[key] = Boolean(value);
+    } else if (field.type === 'number') {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < (field.min ?? -Infinity) || n > (field.max ?? Infinity)) throw httpError(400, `${key} must be a number from ${field.min} to ${field.max}.`);
+      updates[key] = n;
     } else if (field.type === 'time') {
       if (!TIME.test(value || '')) throw httpError(400, `Invalid time "${value}". Use HH:MM.`);
       updates[key] = value;
