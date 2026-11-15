@@ -1,0 +1,7 @@
+# Used when the backend is installed on its own (Hostinger installs backend.tar.gz by itself).
+# core-js (via twitter-text) has a postinstall script that only prints a message: skip it, or newer pnpm
+# stops the install with ERR_PNPM_IGNORED_BUILDS. allowBuilds is read by newer pnpm, ignoredBuiltDependencies by pnpm 10.
+allowBuilds:
+  core-js: false
+ignoredBuiltDependencies:
+  - core-js

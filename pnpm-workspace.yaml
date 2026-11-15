@@ -1,3 +1,10 @@
 packages:
   - backend
   - frontend
+
+# core-js (via twitter-text) has a postinstall script that only prints a message: skip it, or newer pnpm
+# stops the install with ERR_PNPM_IGNORED_BUILDS. Keep in sync with backend/pnpm-workspace.yaml.
+allowBuilds:
+  core-js: false
+ignoredBuiltDependencies:
+  - core-js
