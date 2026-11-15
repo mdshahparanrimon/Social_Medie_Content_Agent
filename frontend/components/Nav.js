@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { CHAT_EVENT } from '@/lib/chatEvents';
+import { AuthModalProvider, useAuthModal } from '@/components/AuthModal';
 import { AccentPicker, ModeSwitch } from '@/components/theme';
 import { AuthProvider, safeNext, UserAvatar, useAuth } from '@/components/auth';
 import { FullPageSpinner } from '@/components/AuthLayout';
@@ -279,8 +280,55 @@ function ChatList({ pathname, onNavigate, searching, onCloseSearch }) {
   );
 }
 
-function SidebarContent({ pathname, onNavigate }) {
+// What a visitor who isn't signed in sees in place of their chats and account.
+function GuestPanel({ onNavigate }) {
+  const { openAuth } = useAuthModal();
+  const open = (mode) => {
+    onNavigate?.();
+    openAuth(mode);
+  };
+  return (
+    <>
+      <div className="mt-5 flex-1">
+        <div className="mx-1 rounded-xl border border-zinc-200 bg-surface p-4">
+          <p className="text-sm font-semibold text-zinc-900">Save your chats</p>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">Sign in to connect your AI, keep your conversations and turn them into posts.</p>
+        </div>
+      </div>
+      <div className="space-y-2 border-t border-zinc-200 px-1 pt-3">
+        <button
+          type="button"
+          onClick={() => open('signup')}
+          className="w-full rounded-lg bg-accent-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-accent-700 dark:hover:brightness-110"
+        >
+          Sign up free
+        </button>
+        <button
+          type="button"
+          onClick={() => open('login')}
+          className="w-full rounded-lg border border-zinc-300 bg-surface px-3 py-2 text-sm font-medium text-zinc-800 transition hover:bg-zinc-50"
+        >
+          Log in
+        </button>
+        <div className="flex items-center justify-between px-1 pt-1">
+          <span className="text-xs font-medium text-zinc-500">Theme</span>
+          <ModeSwitch />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SidebarContent({ pathname, onNavigate, guest = false }) {
   const [searching, setSearching] = useState(false);
+  const { openAuth } = useAuthModal();
+  // Guests can open the chat; every other page asks them to sign in first.
+  const gated = (href) => (e) => {
+    if (!guest) return onNavigate?.();
+    e.preventDefault();
+    onNavigate?.();
+    openAuth('login', href);
+  };
   return (
     <div className="flex h-full flex-col px-2 py-3">
       <div className="mb-3 px-1">
@@ -293,33 +341,42 @@ function SidebarContent({ pathname, onNavigate }) {
           </span>
           <span className="font-medium">New chat</span>
         </Link>
-        <button type="button" onClick={() => setSearching((v) => !v)} className={rowClass(searching)}>
-          <Icon name="search" />
-          Search
-        </button>
+        {!guest && (
+          <button type="button" onClick={() => setSearching((v) => !v)} className={rowClass(searching)}>
+            <Icon name="search" />
+            Search
+          </button>
+        )}
         {WORKSPACE_LINKS.map(({ href, label, icon }) => {
           const active = isActive(href, pathname);
           return (
-            <Link key={href} href={href} onClick={onNavigate} aria-current={active ? 'page' : undefined} className={rowClass(active)}>
+            <Link key={href} href={href} onClick={gated(href)} aria-current={active ? 'page' : undefined} className={rowClass(active)}>
               <Icon name={icon} />
               {label}
             </Link>
           );
         })}
       </nav>
-      <div className="mt-5 flex min-h-0 flex-1 flex-col">
-        <ChatList pathname={pathname} onNavigate={onNavigate} searching={searching} onCloseSearch={() => setSearching(false)} />
-      </div>
-      <div className="border-t border-zinc-200 pt-2">
-        <UserMenu pathname={pathname} onNavigate={onNavigate} />
-      </div>
+      {guest ? (
+        <GuestPanel onNavigate={onNavigate} />
+      ) : (
+        <>
+          <div className="mt-5 flex min-h-0 flex-1 flex-col">
+            <ChatList pathname={pathname} onNavigate={onNavigate} searching={searching} onCloseSearch={() => setSearching(false)} />
+          </div>
+          <div className="border-t border-zinc-200 pt-2">
+            <UserMenu pathname={pathname} onNavigate={onNavigate} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function Shell({ children }) {
+function Shell({ children, guest = false }) {
   const pathname = usePathname();
   const { isAdmin } = useAuth();
+  const { openAuth } = useAuthModal();
   const [open, setOpen] = useState(false);
   const current = ALL_LINKS.find((l) => isActive(l.href, pathname));
   const forbidden = pathname.startsWith('/admin') && !isAdmin;
@@ -337,7 +394,7 @@ function Shell({ children }) {
     <div className="min-h-screen lg:pl-64">
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 hidden w-64 border-r border-zinc-200 bg-sidebar lg:block">
-        <SidebarContent pathname={pathname} />
+        <SidebarContent pathname={pathname} guest={guest} />
       </aside>
 
       {/* Mobile drawer */}
@@ -345,7 +402,7 @@ function Shell({ children }) {
         <div className="fixed inset-0 z-40 lg:hidden">
           <div className="absolute inset-0 bg-black/40" onClick={() => setOpen(false)} />
           <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] overflow-y-auto border-r border-zinc-200 bg-sidebar shadow-xl">
-            <SidebarContent pathname={pathname} onNavigate={() => setOpen(false)} />
+            <SidebarContent pathname={pathname} guest={guest} onNavigate={() => setOpen(false)} />
           </aside>
         </div>
       )}
@@ -367,6 +424,15 @@ function Shell({ children }) {
             <span className="truncate font-medium text-zinc-900">{current?.label || 'Page'}</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {guest ? (
+              <button
+                type="button"
+                onClick={() => openAuth('login')}
+                className="rounded-md bg-accent-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-accent-700 dark:hover:brightness-110"
+              >
+                Log in
+              </button>
+            ) : (
             <Link
               href="/instant"
               className="hidden items-center gap-1.5 rounded-md bg-accent-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-accent-700 dark:hover:bg-accent-600 dark:hover:brightness-110 sm:inline-flex"
@@ -374,6 +440,7 @@ function Shell({ children }) {
               <Icon name="instant" className="size-4" />
               New post
             </Link>
+            )}
           </div>
         </div>
       </header>
@@ -392,26 +459,29 @@ function Shell({ children }) {
   );
 }
 
-// Decides what to show: the public auth pages, the login redirect, the verify-email screen, or the app.
+// Decides what to show: the public pages, the chat home (open to guests), the sign-in popup for every
+// other page, the verify-email screen, or the app.
 function Gate({ children }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, status } = useAuth();
   const isPublic = PUBLIC_ROUTES.some((r) => pathname.startsWith(r));
   const guestOnly = GUEST_ONLY.some((r) => pathname.startsWith(r));
+  const isHome = pathname === '/';
 
   useEffect(() => {
-    if (status === 'signed-out' && !isPublic) {
-      const here = window.location.pathname + window.location.search;
-      router.replace(here === '/' ? '/login' : `/login?${new URLSearchParams({ next: here })}`);
+    // Other pages need an account: back to the chat home with the sign-in popup, then on to the page.
+    if (status === 'signed-out' && !isPublic && !isHome) {
+      router.replace(`/?${new URLSearchParams({ auth: 'login', next: window.location.pathname + window.location.search })}`);
     }
     if (status === 'signed-in' && guestOnly) {
       router.replace(safeNext(new URLSearchParams(window.location.search).get('next')));
     }
-  }, [status, isPublic, guestOnly, router]);
+  }, [status, isPublic, isHome, guestOnly, router]);
 
   if (isPublic) return status === 'signed-in' && guestOnly ? <FullPageSpinner /> : children;
-  if (status !== 'signed-in') return <FullPageSpinner />;
+  if (status === 'loading') return <FullPageSpinner />;
+  if (status === 'signed-out') return isHome ? <Shell guest>{children}</Shell> : <FullPageSpinner />;
   if (!user.email_verified) return <VerifyEmailGate />;
   return <Shell>{children}</Shell>;
 }
@@ -419,7 +489,9 @@ function Gate({ children }) {
 export default function AppShell({ children }) {
   return (
     <AuthProvider>
-      <Gate>{children}</Gate>
+      <AuthModalProvider>
+        <Gate>{children}</Gate>
+      </AuthModalProvider>
     </AuthProvider>
   );
 }

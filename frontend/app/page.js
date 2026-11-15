@@ -4,7 +4,9 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { notifyChats } from '@/lib/chatEvents';
+import Link from 'next/link';
 import { useAuth } from '@/components/auth';
+import { useAuthModal } from '@/components/AuthModal';
 import { ErrorText } from '@/components/ui';
 import PostCard from '@/components/PostCard';
 
@@ -182,9 +184,47 @@ function Welcome({ onPick, composer }) {
   );
 }
 
+// Shown above the message box when the chat can't run yet: not signed in, or no AI connected.
+function SetupNotice({ guest, onAuth }) {
+  return (
+    <div className="mx-auto mb-3 flex max-w-3xl flex-col gap-3 rounded-2xl border border-accent-100 bg-accent-50 px-4 py-3 text-left sm:flex-row sm:items-center">
+      <span className="hidden size-9 shrink-0 place-items-center rounded-xl bg-surface text-accent-700 ring-1 ring-accent-100 sm:grid">
+        <Glyph name="spark" className="size-[18px]" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-zinc-900">{guest ? 'Sign in to start chatting' : 'Connect an AI to start chatting'}</p>
+        <p className="mt-0.5 text-xs leading-5 text-zinc-600">
+          {guest
+            ? 'Create a free account, then connect your own AI provider. Google Gemini has a free tier.'
+            : 'Add an AI provider in Settings → AI. Google Gemini has a free tier; Claude gives the best results.'}
+        </p>
+      </div>
+      {guest ? (
+        <div className="flex shrink-0 gap-2">
+          <button type="button" onClick={() => onAuth('login')} className="rounded-lg border border-zinc-300 bg-surface px-3 py-1.5 text-sm font-medium text-zinc-800 hover:bg-zinc-50">
+            Log in
+          </button>
+          <button type="button" onClick={() => onAuth('signup')} className="rounded-lg bg-accent-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-accent-700 dark:hover:brightness-110">
+            Sign up
+          </button>
+        </div>
+      ) : (
+        <Link href="/settings#ai" className="shrink-0 rounded-lg bg-accent-600 px-3 py-1.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-accent-700 dark:hover:brightness-110">
+          Connect AI
+        </Link>
+      )}
+    </div>
+  );
+}
+
 function ChatView() {
   const router = useRouter();
   const requested = useSearchParams().get('c'); // the conversation in the URL, none = new chat
+  const { status } = useAuth();
+  const { openAuth } = useAuthModal();
+  const guest = status !== 'signed-in';
+  const [ai, setAi] = useState(null); // the workspace's AI provider status, once loaded
+  const needsAi = !guest && ai !== null && !ai.ready;
   const [current, setCurrent] = useState(null);
   const [title, setTitle] = useState('');
   const [messages, setMessages] = useState([]);
@@ -205,8 +245,18 @@ function ChatView() {
     return rest;
   }), []);
 
+  // Whether an AI provider is connected; checked again when the user comes back to this tab (e.g. from Settings).
+  useEffect(() => {
+    if (guest) return setAi(null);
+    const check = () => api('/status').then((s) => setAi(s.ai || null)).catch(() => {});
+    check();
+    window.addEventListener('focus', check);
+    return () => window.removeEventListener('focus', check);
+  }, [guest]);
+
   // Follow the URL: open the conversation it names, or start fresh. A chat this page just created is already shown.
   useEffect(() => {
+    if (guest) return; // guests have no saved chats
     if (requested && requested === currentRef.current) return;
     setError('');
     setPosts({});
@@ -236,7 +286,7 @@ function ChatView() {
     return () => {
       cancelled = true;
     };
-  }, [requested]);
+  }, [requested, guest]);
 
   useEffect(() => {
     if (messages.length || busy) bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -253,6 +303,15 @@ function ChatView() {
   async function send(text) {
     const message = text.trim();
     if (!message || busy) return;
+    // Keep what they typed: after signing in (or connecting an AI) they can send it as it is.
+    if (guest) {
+      setInput(message);
+      return openAuth('signup');
+    }
+    if (needsAi) {
+      setInput(message);
+      return;
+    }
     setBusy(true);
     setError('');
     setInput('');
@@ -293,6 +352,8 @@ function ChatView() {
   const empty = !loading && messages.length === 0;
 
   const composer = (
+    <>
+    {(guest || needsAi) && <SetupNotice guest={guest} onAuth={(mode) => openAuth(mode)} />}
     <form
       onSubmit={(e) => {
         e.preventDefault();
@@ -316,17 +377,28 @@ function ChatView() {
       />
       <button
         type="submit"
-        disabled={busy || !input.trim()}
+        disabled={busy || needsAi || !input.trim()}
         className="grid size-10 shrink-0 place-items-center rounded-full bg-accent-600 text-white shadow-sm transition hover:bg-accent-700 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400 disabled:shadow-none dark:hover:brightness-110"
         aria-label="Send"
       >
         <Glyph name="send" className="size-[18px]" strokeWidth={2.2} />
       </button>
     </form>
+    </>
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface">
+    <div className="relative flex h-full min-h-0 flex-col bg-surface">
+      {guest && (
+        <div className="absolute top-3 right-4 z-10 hidden gap-2 lg:flex">
+          <button type="button" onClick={() => openAuth('login')} className="rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100">
+            Log in
+          </button>
+          <button type="button" onClick={() => openAuth('signup')} className="rounded-lg bg-zinc-900 px-3.5 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:hover:bg-zinc-700">
+            Sign up free
+          </button>
+        </div>
+      )}
       {!empty && (
         <header className="flex h-12 shrink-0 items-center justify-center border-b border-zinc-200 px-4">
           <h1 className="truncate text-sm font-medium text-zinc-800">{title || 'New chat'}</h1>
