@@ -1,21 +1,38 @@
+import twitterText from 'twitter-text';
+
 // Per-platform writing rules. The frontend keeps a copy of the labels and limits in lib/api.js.
 // image: the AI image model is asked for `aspect`; the result is cropped to width x height.
 // video: AI video models make 16:9 or 9:16 only, so each platform gets the closer of the two.
+// hashtags: the usual range for good posts (a brand's hashtag policy can narrow it, see quality/lint.js).
+// hookChars: roughly how much of the text shows before the platform's "see more" cut.
+// ideal: a comfortable length range in characters; outside it is a warning, not an error.
+// altText: whether the publisher sends alt text to the platform (true only where the API call exists in publishers/).
+// linksClickable: false means a pasted URL is plain text (Instagram captions).
 export const PLATFORMS = {
   x: {
     label: 'X',
     maxChars: 280,
+    hashtags: { min: 0, max: 2 },
+    hookChars: 100,
+    ideal: [40, 270],
+    altText: false,
+    linksClickable: true,
     image: { aspect: '16:9', width: 1600, height: 900 },
     video: { aspect: '16:9' },
     guide: [
-      'A single post (not a thread), at most 280 characters including hashtags and links.',
-      'Punchy first line, one clear idea, conversational.',
+      'A single post (not a thread), at most 280 weighted characters (links count as 23, emoji as 2) including hashtags.',
+      'Punchy first line, one clear idea, conversational. No markdown formatting.',
       'Use 0-2 hashtags, only if they add reach.',
     ].join('\n'),
   },
   linkedin: {
     label: 'LinkedIn',
     maxChars: 3000,
+    hashtags: { min: 0, max: 5 },
+    hookChars: 140,
+    ideal: [600, 1300],
+    altText: true,
+    linksClickable: true,
     image: { aspect: '1:1', width: 1200, height: 1200 },
     video: { aspect: '16:9' },
     // PDF carousels (document posts); the caption is the post text.
@@ -30,18 +47,30 @@ export const PLATFORMS = {
   meta: {
     label: 'Facebook',
     maxChars: 5000,
+    hashtags: { min: 0, max: 3 },
+    hookChars: 125,
+    ideal: [150, 1500],
+    altText: false,
+    linksClickable: true,
     image: { aspect: '1:1', width: 1200, height: 1200 },
     video: { aspect: '9:16' },
     guide: [
-      'A Facebook Page post. Warm, conversational, community-oriented.',
-      'Ideal length 40-250 words. No markdown formatting.',
-      'End with a question or call to action. Use 0-3 hashtags.',
+      'A Facebook Page post. Warm, conversational, community-oriented; write to "you", not at an audience.',
+      'Ideal length 40-250 words; the first ~125 characters show before "See more". No markdown formatting.',
+      'One link at most, placed on its own line near the end; Facebook previews it. A photo post with the text as caption usually beats a bare link.',
+      'Ask a question or give one clear next step. Use 0-3 hashtags.',
+      'Videos: square or vertical, captions burned in (most people watch muted).',
     ].join('\n'),
   },
   instagram: {
     label: 'Instagram',
     maxChars: 2200,
     needsImage: true,
+    hashtags: { min: 0, max: 8 },
+    hookChars: 125,
+    ideal: [100, 1500],
+    altText: true,
+    linksClickable: false,
     image: { aspect: '4:5', width: 1080, height: 1350 },
     // Posted as a Reel.
     video: { aspect: '9:16' },
@@ -57,20 +86,9 @@ export const PLATFORMS = {
 
 export const PLATFORM_KEYS = Object.keys(PLATFORMS);
 
-// X counts most emoji and some scripts as 2 characters and every link as 23.
+// X's real counting rules (twitter-text, X's own library): NFC-normalised text, most emoji and CJK/Bengali/etc. count
+// as 2, every link (including bare "example.com") counts as 23. Other platforms count Unicode characters.
 export function charCount(platform, text) {
   if (platform !== 'x') return [...text].length;
-  const withoutUrls = text.replace(/https?:\/\/\S+/g, '');
-  const urlCount = (text.match(/https?:\/\/\S+/g) || []).length;
-  let count = urlCount * 23;
-  for (const ch of withoutUrls) {
-    const cp = ch.codePointAt(0);
-    const light =
-      cp <= 4351 ||
-      (cp >= 8192 && cp <= 8205) ||
-      (cp >= 8208 && cp <= 8223) ||
-      (cp >= 8242 && cp <= 8247);
-    count += light ? 1 : 2;
-  }
-  return count;
+  return twitterText.parseTweet(text).weightedLength;
 }

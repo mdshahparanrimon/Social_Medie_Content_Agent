@@ -21,6 +21,65 @@ export async function complete({ config, system, prompt, schema }) {
   }
 }
 
+// Chat messages (see llm/chat.js) -> Gemini contents. Gemini's own earlier turns are sent back unchanged (raw):
+// Gemini 3 requires the thought signatures on its function calls to come back as they were.
+export function toGeminiContents(messages) {
+  return messages.map((m) => {
+    if (m.role === 'user') return { role: 'user', parts: [{ text: m.content }] };
+    if (m.role === 'tool') {
+      return {
+        role: 'user',
+        parts: m.results.map((r) => ({ functionResponse: { ...(r.id && !r.id.startsWith('call_') && { id: r.id }), name: r.name, response: r.is_error ? { error: r.content } : { result: r.content } } })),
+      };
+    }
+    if (m.raw?.provider === 'gemini') return { role: 'model', parts: m.raw.value };
+    const parts = [];
+    if (m.content) parts.push({ text: m.content });
+    for (const call of m.tool_calls || []) parts.push({ functionCall: { name: call.name, args: call.args } });
+    return { role: 'model', parts };
+  });
+}
+
+// One step of a tool-using conversation (the agent loop runs the tools).
+export async function chat({ config, system, messages, tools }) {
+  const modelName = model(config);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`;
+  const res = await fetchWithRetry(
+    url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': config.gemini_api_key },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: toGeminiContents(messages),
+        tools: [{ functionDeclarations: tools.map((t) => ({ name: t.name, description: t.description, parametersJsonSchema: t.parameters })) }],
+      }),
+    },
+    'Gemini',
+  );
+  const data = await res.json();
+  const candidate = data.candidates?.[0];
+  const parts = candidate?.content?.parts || [];
+  const calls = parts.filter((p) => p.functionCall);
+  const text = parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('');
+  if (!text && !calls.length) {
+    const reason = candidate?.finishReason || data.promptFeedback?.blockReason || 'unknown reason';
+    throw httpError(502, `Gemini returned no answer (${reason}).`);
+  }
+  const meta = data.usageMetadata || {};
+  return {
+    text,
+    tool_calls: calls.map((p, i) => ({ id: p.functionCall.id || `call_${Date.now()}_${i}`, name: p.functionCall.name, args: p.functionCall.args || {} })),
+    raw: parts,
+    usage: {
+      model: modelName,
+      input_tokens: meta.promptTokenCount ?? 0,
+      output_tokens: (meta.candidatesTokenCount ?? 0) + (meta.thoughtsTokenCount ?? 0),
+      cost_usd: null,
+    },
+  };
+}
+
 async function generate(modelName, { config, system, prompt, schema }, retries) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`;
   const res = await fetchWithRetry(

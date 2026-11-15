@@ -27,6 +27,7 @@ export async function api(path, { method = 'GET', body } = {}) {
     const err = new Error(message);
     err.status = res.status;
     err.code = data?.code;
+    err.details = data?.details;
     throw err;
   }
   return data ?? {};

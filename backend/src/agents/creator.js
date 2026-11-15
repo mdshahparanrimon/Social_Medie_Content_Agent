@@ -2,27 +2,13 @@ import { repo } from '../db/index.js';
 import { httpError } from '../errors.js';
 import { getBrand, brandContext, missingBrandFields } from '../brandBrain.js';
 import { generateJSON } from '../llm/index.js';
-import { PLATFORMS, charCount } from '../platforms.js';
-
-// A draft must score at least this (1-10) in self-review, or it gets revised.
-const MIN_SCORE = 8;
-const MAX_REVISIONS = 2;
+import { PLATFORMS } from '../platforms.js';
+import { reviseUntilReady, qualityFromRevision } from '../quality/gate.js';
 
 const POST_SCHEMA = {
   type: 'object',
   properties: { post: { type: 'string' } },
   required: ['post'],
-  additionalProperties: false,
-};
-
-const REVIEW_SCHEMA = {
-  type: 'object',
-  properties: {
-    score: { type: 'integer' },
-    issues: { type: 'array', items: { type: 'string' } },
-    revision_instructions: { type: 'string' },
-  },
-  required: ['score', 'issues', 'revision_instructions'],
   additionalProperties: false,
 };
 
@@ -46,55 +32,17 @@ ${guide}`;
   return post.trim();
 }
 
-async function reviewDraft({ brand, platform, brief, content }) {
-  const { label, guide } = PLATFORMS[platform];
-  const system = `${brandContext(brand)}
-
-# Your role
-You are a strict brand editor. You judge whether a draft is on-brand and ready to publish.`;
-
-  const prompt = `Review this ${label} draft.
-
-Brief:
-<brief>
-${brief}
-</brief>
-
-Platform rules:
-${guide}
-
-Draft:
-<draft>
-${content}
-</draft>
-
-Score it from 1 to 10 for publish-readiness: brand voice and tone, fit with the audience and goal, strength of the hook, clarity, platform fit, and that it avoids the brand's forbidden topics. 8 means ready to publish. List concrete issues (empty if none) and give short revision instructions.`;
-
-  const review = await generateJSON({ task: 'critic', system, prompt, schema: REVIEW_SCHEMA, effort: 'low' });
-  return { ...review, score: Math.min(Math.max(review.score, 1), 10) };
-}
-
-// Generate -> self-review -> revise until the draft is on-brand and fits the platform.
+// Generate -> check (rules + independent AI review) -> revise only what failed, a configurable number of times.
+// The first draft is always kept; if nothing passes, the best version is saved with the reasons for a person to review.
 async function writeWithReview({ platform, brief, previous, notes }) {
   const brand = await getBrand();
   const missing = missingBrandFields(brand);
   if (missing.length) throw httpError(400, `Fill in your Brand Brain first: ${missing.join(', ')}.`);
   if (!PLATFORMS[platform]) throw httpError(400, `Unknown platform: ${platform}`);
 
-  let content = await writeDraft({ brand, platform, brief, previous, notes });
-  let review;
-  for (let revision = 0; ; revision++) {
-    review = await reviewDraft({ brand, platform, brief, content });
-    const length = charCount(platform, content);
-    const { maxChars } = PLATFORMS[platform];
-    const tooLong = length > maxChars;
-    if ((review.score >= MIN_SCORE && !tooLong) || revision === MAX_REVISIONS) break;
-
-    const feedback = [review.revision_instructions, ...review.issues];
-    if (tooLong) feedback.unshift(`It is ${length} characters but the limit is ${maxChars}. Make it shorter.`);
-    content = await writeDraft({ brand, platform, brief, previous: content, notes: feedback.join('\n') });
-  }
-  return { content, score: review.score, critique: review.issues.join('\n') };
+  const write = (prev, feedback) => writeDraft({ brand, platform, brief, previous: prev, notes: feedback });
+  const first = await writeDraft({ brand, platform, brief, previous, notes });
+  return reviseUntilReady({ platform, brief, first, write, brand });
 }
 
 export async function getPost(id) {
@@ -104,28 +52,28 @@ export async function getPost(id) {
 }
 
 export async function createPost({ platform, brief, calendarItemId = null }) {
-  const { content, score, critique } = await writeWithReview({ platform, brief });
-  return repo.createPost({
+  const result = await writeWithReview({ platform, brief });
+  const post = await repo.createPost({
     calendar_item_id: calendarItemId,
     platform,
     brief,
-    content,
-    brand_score: score,
-    critique,
+    content: result.content,
+    brand_score: result.score10,
+    critique: result.critique,
   });
+  return repo.updatePost(post.id, { quality: qualityFromRevision(result) });
 }
 
 export async function rewritePost(id, userFeedback) {
   const post = await getPost(id);
   if (post.status !== 'draft') throw httpError(409, 'Only drafts can be rewritten.');
   const notes = userFeedback?.trim() || 'Write a fresh version with a different angle and a stronger hook.';
-  const { content, score, critique } = await writeWithReview({
-    platform: post.platform,
-    brief: post.brief,
-    previous: post.content,
-    notes,
-  });
-  const updated = await repo.updatePost(id, { content, brand_score: score, critique }, { onlyIfStatus: ['draft'] });
+  const result = await writeWithReview({ platform: post.platform, brief: post.brief, previous: post.content, notes });
+  const updated = await repo.updatePost(
+    id,
+    { content: result.content, brand_score: result.score10, critique: result.critique, quality: qualityFromRevision(result) },
+    { onlyIfStatus: ['draft'] },
+  );
   if (!updated) throw httpError(409, 'This post changed while it was being rewritten. Reload and try again.');
   return updated;
 }

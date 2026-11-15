@@ -11,6 +11,7 @@ const TABS = [
   { key: 'scheduled', label: 'Scheduled', statuses: ['approved', 'publishing'] },
   { key: 'published', label: 'Published', statuses: ['published'] },
   { key: 'failed', label: 'Failed', statuses: ['failed'] },
+  { key: 'uncertain', label: 'Needs check', statuses: ['uncertain'] },
 ];
 
 function PostsView() {

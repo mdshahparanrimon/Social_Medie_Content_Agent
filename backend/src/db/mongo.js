@@ -37,6 +37,10 @@ export async function connect() {
   const workspaces = db.collection('workspaces');
   const sessions = db.collection('sessions');
   const authTokens = db.collection('auth_tokens');
+  const assets = db.collection('assets');
+  const attempts = db.collection('publish_attempts');
+  const audit = db.collection('audit_log');
+  const conversations = db.collection('conversations');
 
   // Before workspaces, accounts were unique per platform across the whole database.
   await accounts.dropIndex('platform_1').catch(() => {});
@@ -59,9 +63,18 @@ export async function connect() {
     sessions.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 }),
     authTokens.createIndex({ user_id: 1, type: 1 }),
     authTokens.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 }),
+    assets.createIndex({ workspace_id: 1, url: 1 }, { unique: true }),
+    assets.createIndex({ workspace_id: 1, kind: 1, sha256: 1 }),
+    assets.createIndex({ workspace_id: 1, kind: 1, source_sha256: 1 }),
+    attempts.createIndex({ workspace_id: 1, post_id: 1, started_at: 1 }),
+    attempts.createIndex({ attempt_id: 1 }, { unique: true }),
+    audit.createIndex({ workspace_id: 1, at: -1 }),
+    audit.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 86400 }),
+    posts.createIndex({ status: 1, lease_expires_at: 1 }),
+    conversations.createIndex({ workspace_id: 1, updated_at: -1 }),
   ]);
 
-  const WORKSPACE_COLLECTIONS = [calendar, posts, usage, accounts];
+  const WORKSPACE_COLLECTIONS = [calendar, posts, usage, accounts, assets, attempts, audit, conversations];
 
   return {
     // ---- Brand Brain (one document per workspace, keyed by workspace id) ----
@@ -113,6 +126,35 @@ export async function connect() {
         .limit(limit)
         .toArray();
       return items.map((item) => item.hook_idea);
+    },
+
+    // ---- Chat conversations (messages are stored in the conversation document) ----
+    async createConversation({ title }) {
+      const doc = { workspace_id: workspaceId(), title, messages: [], created_at: now(), updated_at: now() };
+      const { insertedId } = await conversations.insertOne(doc);
+      return out({ ...doc, _id: insertedId });
+    },
+    async getConversation(id) {
+      const _id = toId(id);
+      return _id ? out(await conversations.findOne(scoped({ _id }))) : null;
+    },
+    async listConversations(limit = 50) {
+      const docs = await conversations
+        .find(scoped(), { projection: { title: 1, created_at: 1, updated_at: 1 } })
+        .sort({ updated_at: -1 })
+        .limit(limit)
+        .toArray();
+      return docs.map(out);
+    },
+    async saveConversation(id, messages) {
+      const _id = toId(id);
+      if (_id) await conversations.updateOne(scoped({ _id }), { $set: { messages, updated_at: now() } });
+    },
+    async deleteConversation(id) {
+      const _id = toId(id);
+      if (!_id) return false;
+      const { deletedCount } = await conversations.deleteOne(scoped({ _id }));
+      return deletedCount > 0;
     },
 
     // ---- Posts ----
@@ -177,15 +219,79 @@ export async function connect() {
 
     // ---- Scheduler: across all workspaces, each result carries its workspace_id ----
     async allDuePosts(nowIso) {
-      const docs = await posts.find({ status: 'approved', scheduled_at: { $lte: nowIso } }).sort({ scheduled_at: 1 }).toArray();
+      const docs = await posts
+        .find({ status: 'approved', scheduled_at: { $lte: nowIso }, $or: [{ next_attempt_at: null }, { next_attempt_at: { $exists: false } }, { next_attempt_at: { $lte: nowIso } }] })
+        .sort({ scheduled_at: 1 })
+        .toArray();
       return docs.map(out);
     },
     // Videos are made in memory; after a restart, ones that were in progress will never finish.
     async failInterruptedVideos(message) {
       await posts.updateMany({ video_status: 'generating' }, { $set: { video_status: 'failed', video_error: message, updated_at: now() } });
     },
-    async failInterruptedPosts(message) {
-      await posts.updateMany({ status: 'publishing' }, { $set: { status: 'failed', error: message, updated_at: now() } });
+    // Posts claimed by a publisher whose lease ran out (it crashed or stalled). They may or may not have gone out.
+    async stalePublishingPosts(nowIso) {
+      const docs = await posts
+        .find({ status: 'publishing', $or: [{ lease_expires_at: null }, { lease_expires_at: { $exists: false } }, { lease_expires_at: { $lte: nowIso } }] })
+        .toArray();
+      return docs.map(out);
+    },
+    async allUncertainPosts() {
+      return (await posts.find({ status: 'uncertain' }).toArray()).map(out);
+    },
+    // Atomic claim: only one caller can move a post from one of fromStatuses to 'publishing'.
+    async claimPost(id, { attemptId, leaseMs, fromStatuses }) {
+      const _id = toId(id);
+      if (!_id) return null;
+      const doc = await posts.findOneAndUpdate(
+        scoped({ _id, status: { $in: fromStatuses } }),
+        {
+          $set: { status: 'publishing', publish_attempt_id: attemptId, lease_expires_at: new Date(Date.now() + leaseMs).toISOString(), next_attempt_at: null, error: null, updated_at: now() },
+          $inc: { publish_attempt_count: 1 },
+        },
+        { returnDocument: 'after' },
+      );
+      return out(doc);
+    },
+    async recentPosts(platform, limit) {
+      const docs = await posts.find(scoped({ platform }), { projection: { content: 1, status: 1, created_at: 1 } }).sort({ created_at: -1 }).limit(limit).toArray();
+      return docs.map(out);
+    },
+    // How many posts of this workspace still use a stored file.
+    async countMediaReferences(url) {
+      return posts.countDocuments(scoped({ $or: [{ image_url: url }, { video_url: url }, { document_url: url }] }));
+    },
+
+    // ---- Stored media files (ownership, hashes for duplicate detection) ----
+    async insertAsset(fields) {
+      await assets.insertOne({ ...fields, workspace_id: workspaceId(), created_at: now() });
+    },
+    async findAsset(filter) {
+      return out(await assets.findOne(scoped(filter)));
+    },
+    async deleteAsset(url) {
+      await assets.deleteOne(scoped({ url }));
+    },
+    // Across workspaces, for the orphan sweep.
+    async assetsCreatedBefore(iso, limit = 200) {
+      return (await assets.find({ created_at: { $lt: iso } }).limit(limit).toArray()).map(out);
+    },
+
+    // ---- Publish attempts and audit trail ----
+    async insertAttempt(fields) {
+      await attempts.insertOne({ ...fields, workspace_id: workspaceId() });
+    },
+    async updateAttempt(attemptId, fields) {
+      await attempts.updateOne(scoped({ attempt_id: attemptId }), { $set: fields });
+    },
+    async listAttempts(postId) {
+      return (await attempts.find(scoped({ post_id: String(postId) })).sort({ started_at: 1 }).toArray()).map(out);
+    },
+    async logAudit(event) {
+      await audit.insertOne({ ...event, workspace_id: workspaceId(), at: new Date() });
+    },
+    async listAudit(limit = 100, filter = {}) {
+      return (await audit.find(scoped(filter)).sort({ at: -1 }).limit(limit).toArray()).map(out);
     },
     async allAccountsForPlatform(platform) {
       return (await accounts.find({ platform }).toArray()).map(out);
